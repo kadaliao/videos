@@ -1,0 +1,1027 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>一束光，打开大脑的开关</title>
+<style>
+  html, body { margin: 0; background: #05070d; }
+  canvas { display: block; width: min(100vw, calc(100vh * 9 / 16)); height: auto; margin: 0 auto; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 8px; padding: 8px; background: #0008; color: #ccd; font: 13px/1.4 -apple-system, sans-serif; }
+  #bar input { flex: 1; }
+</style>
+</head>
+<body>
+<canvas id="stage" width="1080" height="1920"></canvas>
+<div id="bar"><button id="play">播放</button><input id="seek" type="range" min="0" max="1000" value="0"><span id="clock">0.00</span></div>
+<script src="build/timeline.js"></script>
+<script>
+// ============ 基础 ============
+const W = 1080, H = 1920, FPS = 30;
+const cv = document.getElementById('stage'), ctx = cv.getContext('2d');
+const C = {
+  bg: '#070b16', grid: 'rgba(110,150,230,0.06)', text: '#f3f6fb', mute: '#8d98b0', dim: '#27304a',
+  blue: '#3d9bff', cyan: '#4de8ff', gold: '#e8c26a', green: '#79e08a', orange: '#ff9a3c', red: '#ff5a6a',
+  violet: '#b391ff', pink: '#ff7eb6', amber: '#ffb020', panel: 'rgba(20,28,46,0.92)', line: 'rgba(140,170,230,0.22)'
+};
+const TYPES = [C.blue, C.pink, C.green, C.amber];          // 四类神经元（蓝色那类会被装上光控开关）
+const CN = '"PingFang SC", "Hiragino Sans GB", sans-serif';
+const NUM = '"Avenir Next", "Helvetica Neue", sans-serif';
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const eo = k => 1 - Math.pow(1 - clamp(k), 3);
+const eio = k => { k = clamp(k); return k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2; };
+const eb = k => { k = clamp(k); const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(k - 1, 3) + c1 * Math.pow(k - 1, 2); };
+const P = (t, a, d = 0.4) => clamp((t - a) / d);
+const rng = seed => () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let x = Math.imul(seed ^ seed >>> 15, 1 | seed); x = x + Math.imul(x ^ x >>> 7, 61 | x) ^ x; return ((x ^ x >>> 14) >>> 0) / 4294967296; };
+
+// ============ 时间轴：按口播字对齐 ============
+const TL = window.TL;
+const SEG = Object.fromEntries(TL.segments.map(s => [s.id, s]));
+const PUN = /[，。！？、；：“”‘’（）《》,.!?;:()"'·…—\-%\s]/g;
+function at(id, phrase, k = 0, end = false) {
+  const s = SEG[id]; const ph = phrase.replace(PUN, '');
+  let pos = -1; for (let i = 0; i <= k; i++) pos = s.clean.indexOf(ph, pos + 1);
+  if (pos < 0) { console.warn('phrase not found', id, phrase); return s.start; }
+  if (end) { const j = Math.min(s.ct.length - 1, pos + ph.length); return s.start + (pos + ph.length >= s.ct.length ? s.dur : s.ct[j]); }
+  return s.start + s.ct[pos];
+}
+const atE = (id, ph, k = 0) => at(id, ph, k, true);
+const S0 = id => SEG[id].start, S1 = id => SEG[id].start + SEG[id].dur;
+
+const SCENES = [];
+for (const s of TL.segments) {
+  const last = SCENES[SCENES.length - 1];
+  if (!last || last.name !== s.scene) SCENES.push({ name: s.scene, a: Math.max(0, s.start - 0.25) });
+}
+SCENES.forEach((s, i) => s.b = i + 1 < SCENES.length ? SCENES[i + 1].a : TL.total);
+SCENES[0].a = 0;
+
+// ============ 绘图工具 ============
+function rr(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+function txt(s, x, y, o = {}) {
+  ctx.save();
+  ctx.font = `${o.weight || 600} ${o.size || 48}px ${o.font || CN}`;
+  ctx.textAlign = o.align || 'center'; ctx.textBaseline = o.base || 'middle';
+  if (o.alpha !== undefined) ctx.globalAlpha *= clamp(o.alpha);
+  if (o.glow) { ctx.shadowColor = o.glow; ctx.shadowBlur = o.blur || 30; }
+  if (o.stroke) { ctx.lineJoin = 'round'; ctx.lineWidth = o.stroke; ctx.strokeStyle = o.strokeColor || 'rgba(0,0,0,.85)'; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = o.color || C.text; ctx.fillText(s, x, y);
+  ctx.restore();
+}
+function rich(parts, cx, y, size, o = {}) {
+  ctx.save(); ctx.textBaseline = 'middle'; if (o.alpha !== undefined) ctx.globalAlpha *= clamp(o.alpha);
+  const font = p => `${o.weight || 700} ${(p[3] || size)}px ${p[2] || o.font || CN}`;
+  let w = 0; for (const p of parts) { ctx.font = font(p); w += ctx.measureText(p[0]).width; }
+  let x = o.align === 'left' ? cx : cx - w / 2;
+  for (const p of parts) {
+    ctx.font = font(p); const pw = ctx.measureText(p[0]).width;
+    if (o.glow) { ctx.shadowColor = o.glow; ctx.shadowBlur = 24; }
+    if (o.stroke) { ctx.lineJoin = 'round'; ctx.lineWidth = o.stroke; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.strokeText(p[0], x, y + (p[4] || 0)); }
+    ctx.fillStyle = p[1] || C.text; ctx.fillText(p[0], x, y + (p[4] || 0)); x += pw;
+  }
+  ctx.restore(); return w;
+}
+function panel(x, y, w, h, o = {}) {
+  ctx.save(); rr(x, y, w, h, o.r || 28);
+  ctx.fillStyle = o.fill || C.panel; ctx.fill();
+  ctx.lineWidth = o.lw || 2; ctx.strokeStyle = o.stroke || C.line; ctx.stroke(); ctx.restore();
+}
+function chip(s, x, y, o = {}) {
+  ctx.save(); if (o.alpha !== undefined) ctx.globalAlpha *= clamp(o.alpha); ctx.font = `${o.weight || 600} ${o.size || 30}px ${CN}`;
+  const w = ctx.measureText(s).width + (o.pad || 28) * 2, h = (o.size || 30) * 1.75;
+  const X = o.align === 'left' ? x : x - w / 2;
+  const col = o.color || C.blue;
+  rr(X, y - h / 2, w, h, h / 2); ctx.fillStyle = o.fill || col + '22'; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = col; ctx.stroke();
+  ctx.fillStyle = col; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(s, X + w / 2, y + 1);
+  ctx.restore(); return w;
+}
+function pop(k, f) { if (k <= 0) return; ctx.save(); ctx.globalAlpha *= clamp(k * 2.5); f(eb(k)); ctx.restore(); }
+function scaleAt(x, y, s) { ctx.translate(x, y); ctx.scale(s, s); ctx.translate(-x, -y); }
+function arrow(x1, y1, x2, y2, color, lw = 6, k = 1) {
+  if (k <= 0) return;
+  const x = lerp(x1, x2, k), y = lerp(y1, y2, k);
+  ctx.save(); ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = lw; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x, y); ctx.stroke();
+  const a = Math.atan2(y2 - y1, x2 - x1), s = lw * 3.2;
+  ctx.beginPath(); ctx.moveTo(x + Math.cos(a) * s * .6, y + Math.sin(a) * s * .6);
+  ctx.lineTo(x - Math.cos(a - .55) * s, y - Math.sin(a - .55) * s); ctx.lineTo(x - Math.cos(a + .55) * s, y - Math.sin(a + .55) * s); ctx.fill();
+  ctx.restore();
+}
+function glowDot(x, y, r, col, a = 1) {
+  ctx.save(); ctx.globalAlpha *= clamp(a);
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r); g.addColorStop(0, col); g.addColorStop(1, col + '00');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+}
+function avatar(x, y, r, ini, col) {
+  ctx.save(); ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = col + '2a'; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = col; ctx.stroke(); ctx.restore();
+  txt(ini, x, y + 2, { size: r * 0.72, font: NUM, weight: 800, color: col });
+}
+// 蓝光光束（自上而下的锥形）
+function lightCone(x, yTop, yBot, w0, w1, col, a) {
+  if (a <= 0) return;
+  ctx.save(); ctx.globalAlpha *= clamp(a);
+  const g = ctx.createLinearGradient(0, yTop, 0, yBot); g.addColorStop(0, col + '00'); g.addColorStop(0.3, col + '55'); g.addColorStop(1, col + '22');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(x - w0 / 2, yTop); ctx.lineTo(x + w0 / 2, yTop); ctx.lineTo(x + w1 / 2, yBot); ctx.lineTo(x - w1 / 2, yBot); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+// ============ 背景与常驻元素 ============
+function background(t) {
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(540 + Math.sin(t * .25) * 140, 860, 40, 540, 860, 1100);
+  g.addColorStop(0, 'rgba(40,100,220,0.24)'); g.addColorStop(1, 'rgba(7,11,22,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // 漂浮的光点
+  const R = rng(11);
+  for (let i = 0; i < 46; i++) {
+    const x = R() * W, y0 = R() * H, sp = 8 + R() * 18, y = ((y0 - t * sp) % H + H) % H;
+    ctx.fillStyle = `rgba(120,180,255,${0.05 + 0.1 * R()})`; ctx.beginPath(); ctx.arc(x, y, 1.5 + R() * 2.5, 0, Math.PI * 2); ctx.fill();
+  }
+  const v = ctx.createLinearGradient(0, 1300, 0, H); v.addColorStop(0, 'rgba(5,7,13,0)'); v.addColorStop(1, 'rgba(5,7,13,0.88)');
+  ctx.fillStyle = v; ctx.fillRect(0, 1300, W, H - 1300);
+}
+
+function headline(t) {
+  const k3 = P(t, at('N2', '光遗传学'), 0.4);
+  txt('2026 诺贝尔生理学或医学奖', 540, 200, { size: 34, weight: 700, color: C.gold });
+  rich([['一束', C.text], ['光', C.blue], ['，打开大脑的开关', C.text]], 540, 292, 74, { weight: 800, glow: 'rgba(61,155,255,.25)' });
+  ctx.save(); ctx.globalAlpha = k3; ctx.save(); scaleAt(540, 390, lerp(1.25, 1, eo(k3)));
+  rich([['光遗传学', C.cyan], [' · Optogenetics', C.cyan, NUM, 44]], 540, 390, 50, { weight: 800 });
+  ctx.restore(); ctx.restore();
+  ctx.save(); ctx.strokeStyle = 'rgba(77,232,255,.35)'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(540 - 300 * eo(k3), 444); ctx.lineTo(540 + 300 * eo(k3), 444); ctx.stroke(); ctx.restore();
+}
+
+function subtitles(t) {
+  const c = TL.cues.find(c => t >= c.a && t < c.b + 0.02);
+  if (!c) return;
+  const k = P(t, c.a, 0.12);
+  const parts = []; const re = /(\d[\d.]*%?|[A-Za-z][A-Za-z0-9.\-]*)/g; let last = 0, m;
+  while ((m = re.exec(c.text))) { if (m.index > last) parts.push([c.text.slice(last, m.index), '#ffffff']); parts.push([m[0], C.gold]); last = m.index + m[0].length; }
+  if (last < c.text.length) parts.push([c.text.slice(last), '#ffffff']);
+  ctx.save(); ctx.globalAlpha = k;
+  rich(parts, 540, 1470 + (1 - eo(k)) * 10, 62, { weight: 700, stroke: 12 });
+  ctx.restore();
+}
+
+// ============ 角色与道具 ============
+// 小鼠（侧面，朝右）。o: asleep, eye(0..1 睁眼), whisk, fear, fiber(0..1), fiberX, fiberTop(绝对 y), beam(0..1), beamCol
+function mouse(x, y, s, o = {}) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  const fear = o.fear || 0, body = fear > 0 ? `rgb(${lerp(207, 255, fear * .35)},${lerp(213, 190, fear)},${lerp(226, 200, fear)})` : '#cfd5e2';
+  if (fear > 0) { ctx.shadowColor = 'rgba(255,90,106,.9)'; ctx.shadowBlur = 40 * fear; }
+  ctx.strokeStyle = '#d9a3a8'; ctx.lineWidth = 9; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-170, 30); ctx.bezierCurveTo(-260, 80, -300, -40, -390, 10); ctx.stroke();
+  ctx.fillStyle = '#e8a9b2';
+  for (const fx of [-95, 55]) { ctx.beginPath(); ctx.ellipse(fx, 98, 28, 12, 0, 0, Math.PI * 2); ctx.fill(); }
+  ctx.fillStyle = body;
+  ctx.beginPath(); ctx.ellipse(-15, 12, 178, 100, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(150, -12, 100, 74, -0.15, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(228, 4, 50, 34, -0.1, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.beginPath(); ctx.arc(100, -78, 46, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#f0b7c0'; ctx.beginPath(); ctx.arc(100, -78, 29, 0, Math.PI * 2); ctx.fill();
+  // 眼
+  const eye = o.asleep ? 0 : (o.eye ?? 1);
+  if (eye > 0.5) {
+    ctx.fillStyle = '#10141f'; ctx.beginPath(); ctx.arc(190, -28, 11 + (fear > 0 ? 2 : 0), 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(194, -32, 3.5, 0, Math.PI * 2); ctx.fill();
+  } else {
+    ctx.strokeStyle = '#2b3245'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(190, -32, 11, 0.25 * Math.PI, 0.75 * Math.PI); ctx.stroke();
+  }
+  ctx.fillStyle = '#f08a9a'; ctx.beginPath(); ctx.arc(276, 0, 10, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.65)'; ctx.lineWidth = 2.5;
+  for (const a0 of [-0.28, 0, 0.28]) { const a = a0 + (o.whisk || 0); ctx.beginPath(); ctx.moveTo(258, 10); ctx.lineTo(258 + Math.cos(a) * 115, 10 + Math.sin(a) * 115); ctx.stroke(); }
+  // 光纤
+  if (o.fiber > 0) {
+    const fx = o.fiberX ?? 135, top = ((o.fiberTop ?? (y - 400)) - y) / s, b = o.beam || 0, col = o.beamCol || C.blue;
+    ctx.save(); ctx.globalAlpha *= clamp(o.fiber);
+    ctx.fillStyle = '#7d879c'; ctx.fillRect(fx - 14, -118, 28, 34);
+    ctx.strokeStyle = b > 0 ? col : '#9aa4ba'; ctx.lineWidth = 7; if (b > 0) { ctx.shadowColor = col; ctx.shadowBlur = 30 * b; }
+    ctx.beginPath(); ctx.moveTo(fx, top); ctx.lineTo(fx, -60); ctx.stroke();
+    ctx.restore();
+    if (b > 0) { glowDot(fx, -50, 110, col, b); glowDot(fx, -50, 34, '#ffffff', b * .8); }
+  }
+  ctx.restore();
+}
+function zzz(x, y, t, a) {
+  if (a <= 0) return;
+  for (let i = 0; i < 3; i++) {
+    const p = ((t * 0.5 + i / 3) % 1);
+    txt('Z', x + p * 60 + i * 6, y - p * 110, { size: 34 + p * 26, font: NUM, weight: 800, color: C.mute, alpha: a * Math.sin(p * Math.PI) });
+  }
+}
+
+// 大脑（侧面）：几个圆的并集 + 小脑 + 脑干
+const BRAIN = [[-175, -5, 150], [-45, -80, 172], [105, -62, 165], [215, 25, 122], [-205, 65, 112], [-60, 62, 165], [100, 68, 150]];
+function brainPath() { ctx.beginPath(); for (const [x, y, r] of BRAIN) { ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, Math.PI * 2); } }
+const inBrain = (x, y, m = 0) => BRAIN.some(([cx, cy, r]) => Math.hypot(x - cx, y - cy) < r - m);
+const BRAIN_PTS = (() => { const R = rng(5), out = []; let n = 0; while (out.length < 620 && n++ < 20000) { const x = -370 + R() * 720, y = -260 + R() * 460; if (inBrain(x, y, 16)) out.push({ x, y, ty: Math.floor(R() * 4), ph: R() * 6.28 }); } return out; })();
+const SULCI = (() => { const R = rng(9), out = []; for (let i = 0; i < 11; i++) { const x = -300 + R() * 560, y = -200 + R() * 330; out.push([x, y, x + 40 + R() * 60, y - 50 + R() * 100, x + 60 + R() * 90, y - 30 + R() * 80]); } return out; })();
+function brain(x, y, s, o = {}) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  const fill = o.fill || '#1a2742', stroke = o.stroke || 'rgba(140,180,255,.7)';
+  ctx.fillStyle = '#16213a'; ctx.strokeStyle = stroke; ctx.lineWidth = 3 / s * 1.4;
+  rr(70, 160, 62, 140, 26); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(190, 175, 95, 62, -0.1, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.save(); ctx.beginPath(); ctx.ellipse(190, 175, 95, 62, -0.1, 0, Math.PI * 2); ctx.clip(); ctx.lineWidth = 2;
+  for (let i = -3; i <= 3; i++) { ctx.beginPath(); ctx.moveTo(90, 175 + i * 16); ctx.quadraticCurveTo(190, 160 + i * 18, 290, 172 + i * 16); ctx.stroke(); } ctx.restore();
+  if (o.glow) { ctx.shadowColor = o.glow; ctx.shadowBlur = 50; }
+  ctx.lineWidth = 6 / s * 1.4; brainPath(); ctx.stroke(); ctx.shadowBlur = 0;
+  ctx.fillStyle = fill; brainPath(); ctx.fill();
+  ctx.save(); brainPath(); ctx.clip(); ctx.strokeStyle = o.sulc || 'rgba(140,180,255,.22)'; ctx.lineWidth = 4;
+  for (const [a, b, c, d, e, f] of SULCI) { ctx.beginPath(); ctx.moveTo(a, b); ctx.quadraticCurveTo(c, d, e, f); ctx.stroke(); }
+  if (o.inner) o.inner();
+  ctx.restore();
+  ctx.restore();
+}
+
+// 衣藻：前端（+x）两根鞭毛，橙色眼点
+function alga(x, y, s, ang, o = {}) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(ang); ctx.scale(s, s);
+  const ph = o.ph || 0;
+  ctx.strokeStyle = 'rgba(200,240,200,.75)'; ctx.lineWidth = 2.6; ctx.lineCap = 'round';
+  for (const sd of [-1, 1]) {
+    ctx.beginPath(); ctx.moveTo(42, sd * 6);
+    ctx.bezierCurveTo(72, sd * (12 + 10 * Math.sin(ph)), 92, sd * (40 + 22 * Math.sin(ph + 1)), 62 + 12 * Math.cos(ph), sd * (74 + 14 * Math.sin(ph + .5)));
+    ctx.stroke();
+  }
+  const g = ctx.createRadialGradient(10, -8, 4, 0, 0, 52); g.addColorStop(0, '#9be89a'); g.addColorStop(1, '#2f8f4c');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(0, 0, 48, 38, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(20,90,45,.55)'; ctx.beginPath(); ctx.ellipse(-10, 0, 34, 30, 0, Math.PI * 0.5, Math.PI * 1.5); ctx.ellipse(-2, 0, 18, 18, 0, Math.PI * 1.5, Math.PI * 0.5, true); ctx.fill();
+  ctx.fillStyle = 'rgba(230,255,230,.55)'; ctx.beginPath(); ctx.arc(14, 2, 11, 0, Math.PI * 2); ctx.fill();
+  if (o.spot > 0) glowDot(12, -30, 26, C.orange, o.spot);
+  ctx.fillStyle = C.orange; ctx.beginPath(); ctx.arc(12, -30, 6.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+// 细胞膜 + 通道
+function membrane(x0, x1, y, chans, open, o = {}) {
+  const near = x => chans.some(c => Math.abs(x - c) < 44);
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,214,150,.45)'; ctx.lineWidth = 2.5;
+  for (let x = x0; x <= x1; x += 22) {
+    if (near(x)) continue;
+    for (const sd of [-1, 1]) { ctx.beginPath(); ctx.moveTo(x - 3, y + sd * 26); ctx.lineTo(x - 3, y + sd * 6); ctx.moveTo(x + 3, y + sd * 26); ctx.lineTo(x + 3, y + sd * 6); ctx.stroke(); }
+    ctx.fillStyle = '#e6b36a';
+    for (const sd of [-1, 1]) { ctx.beginPath(); ctx.arc(x, y + sd * 32, 9, 0, Math.PI * 2); ctx.fill(); }
+  }
+  for (const cx of chans) {
+    const g = lerp(4, 30, eo(open)), col = open > 0.05 ? C.blue : C.violet;
+    ctx.save(); if (open > 0.05) { ctx.shadowColor = C.blue; ctx.shadowBlur = 30 * open; }
+    ctx.fillStyle = col; rr(cx - g / 2 - 34, y - 64, 34, 128, 14); ctx.fill(); rr(cx + g / 2, y - 64, 34, 128, 14); ctx.fill();
+    ctx.restore();
+    if (o.label) txt(o.label, cx, y - 92, { size: 24, weight: 700, color: col, alpha: o.labelA ?? 1 });
+  }
+  ctx.restore();
+}
+function ion(x, y, a = 1) {
+  ctx.save(); ctx.globalAlpha *= clamp(a); ctx.fillStyle = '#ffd84a'; ctx.shadowColor = '#ffd84a'; ctx.shadowBlur = 12;
+  ctx.beginPath(); ctx.arc(x, y, 13, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0;
+  ctx.fillStyle = '#3a2a00'; ctx.font = `800 22px ${NUM}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('+', x, y + 1); ctx.restore();
+}
+function ionFlow(cx, y, t, open, seed) {
+  const R = rng(seed);
+  for (let i = 0; i < 7; i++) {
+    const sx = cx + (R() - .5) * 180, ex = cx + (R() - .5) * 160, ph = R();
+    if (open < 0.4) { ion(sx + Math.sin(t * 1.3 + i) * 12, y - 140 + Math.cos(t * 1.1 + i * 2) * 14, 0.9); continue; }
+    const p = (t * 0.55 + ph) % 1;
+    let X, Y;
+    if (p < .4) { X = lerp(sx, cx, eio(p / .4)); Y = lerp(y - 150, y - 50, p / .4); }
+    else if (p < .6) { X = cx; Y = lerp(y - 50, y + 50, (p - .4) / .2); }
+    else { X = lerp(cx, ex, eo((p - .6) / .4)); Y = lerp(y + 50, y + 160, (p - .6) / .4); }
+    ion(X, Y, Math.min(1, (1 - p) * 6, p * 8));
+  }
+}
+
+// 神经元：胞体在 (0,0)，树突向左，轴突向右
+function buildNeuron(seed, axLen) {
+  const R = rng(seed), segs = [], dots = [];
+  const br = (x, y, a, len, w, d) => {
+    const x2 = x + Math.cos(a) * len, y2 = y + Math.sin(a) * len; segs.push([x, y, x2, y2, w]);
+    if (R() < .6) dots.push([(x + x2) / 2, (y + y2) / 2]);
+    if (d > 0) { br(x2, y2, a - .35 - R() * .3, len * .72, w * .7, d - 1); br(x2, y2, a + .35 + R() * .3, len * .72, w * .7, d - 1); }
+  };
+  for (let i = 0; i < 6; i++) { const a = Math.PI - 1.25 + i * 0.5 + (R() - .5) * .2; br(Math.cos(a) * 34, Math.sin(a) * 34, a, 70 + R() * 30, 9, 2); }
+  const ax = []; for (let i = 0; i <= 40; i++) { const u = i / 40; ax.push([36 + u * axLen, Math.sin(u * 7 + seed) * 10]); }
+  const term = []; const [ex, ey] = ax[ax.length - 1];
+  for (let i = 0; i < 4; i++) { const a = -0.75 + i * 0.5; term.push([ex, ey, ex + Math.cos(a) * 55, ey + Math.sin(a) * 55]); }
+  for (let i = 0; i < 14; i++) { const a = i / 14 * Math.PI * 2; dots.push([Math.cos(a) * 40, Math.sin(a) * 40]); }
+  return { segs, ax, term, dots };
+}
+const NEU = buildNeuron(3, 520);
+function neuron(x, y, s, o = {}) {
+  const N = o.N || NEU, col = o.color || '#8c9cc2';
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s); ctx.lineCap = 'round';
+  if (o.glow > 0) { ctx.shadowColor = o.glowCol || C.blue; ctx.shadowBlur = 40 * o.glow; }
+  ctx.strokeStyle = col;
+  for (const [a, b, c, d, w] of N.segs) { ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c, d); ctx.stroke(); }
+  ctx.lineWidth = 7; ctx.beginPath(); N.ax.forEach(([a, b], i) => i ? ctx.lineTo(a, b) : ctx.moveTo(a, b)); ctx.stroke();
+  ctx.lineWidth = 4; for (const [a, b, c, d] of N.term) { ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c, d); ctx.stroke(); }
+  const g = ctx.createRadialGradient(-8, -10, 4, 0, 0, 46); g.addColorStop(0, o.glow > 0 ? '#dff0ff' : '#c4cee6'); g.addColorStop(1, col);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, 44, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  if (o.chr > 0) {
+    const n = Math.floor(N.dots.length * clamp(o.chr));
+    for (let i = 0; i < n; i++) { const [a, b] = N.dots[(i * 7) % N.dots.length]; ctx.fillStyle = C.blue; ctx.beginPath(); ctx.arc(a, b, 6, 0, Math.PI * 2); ctx.fill(); }
+  }
+  for (const p of (o.pulses || [])) {   // 沿轴突传播的信号
+    if (p <= 0 || p >= 1) continue;
+    const i = Math.min(N.ax.length - 1, Math.floor(p * (N.ax.length - 1))); const [a, b] = N.ax[i];
+    glowDot(a, b, 46, '#9fd0ff', 1); glowDot(a, b, 16, '#ffffff', 1);
+  }
+  ctx.restore();
+}
+
+// 示波器：光脉冲（蓝条）与动作电位
+function scope(x, y, w, h, t, t0, pulses, win) {
+  panel(x, y - h / 2 - 30, w, h + 60, { fill: 'rgba(8,14,26,.9)', stroke: C.line, r: 20 });
+  const bx = x + 30, bw = w - 60, base = y + h * 0.2, now = t - t0;
+  ctx.save(); ctx.strokeStyle = 'rgba(140,170,230,.18)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(bx, base); ctx.lineTo(bx + bw, base); ctx.stroke(); ctx.restore();
+  const spike = d => d < 0 ? 0 : d < .012 ? d / .012 : d < .03 ? 1 - (d - .012) / .018 * 1.3 : d < .14 ? -.3 * (1 - (d - .03) / .11) : 0;
+  for (const p of pulses) { if (p > now) continue; const px = bx + p / win * bw; ctx.fillStyle = C.blue; ctx.fillRect(px - 3, y - h / 2 - 16, 8, 16); }
+  ctx.save(); ctx.strokeStyle = C.cyan; ctx.lineWidth = 3.5; ctx.shadowColor = C.cyan; ctx.shadowBlur = 10; ctx.beginPath();
+  const end = Math.min(bw, now / win * bw);
+  for (let i = 0; i <= end; i += 1) { const tt = i / bw * win; let v = 0; for (const p of pulses) v += spike(tt - p - .004); const Y = base - v * h * .75; i ? ctx.lineTo(bx + i, Y) : ctx.moveTo(bx, Y); }
+  ctx.stroke(); ctx.restore();
+  txt('蓝光', x + w - 40, y - h / 2 - 8, { size: 22, color: C.blue, align: 'right' });
+}
+
+// 眼球（侧剖，朝左看）
+const RODS = (() => { const R = rng(21); return Array.from({ length: 26 }, (_, i) => ({ a: -1.0 + 2.0 * i / 25, die: R() })); })();
+function eyeball(x, y, r, o = {}) {
+  ctx.save();
+  ctx.fillStyle = '#121a2c'; ctx.strokeStyle = '#a9b8d6'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x - r * 0.72, y, r * 0.42, Math.PI * 0.62, Math.PI * 1.38); ctx.stroke();
+  ctx.fillStyle = 'rgba(190,215,255,.28)'; ctx.beginPath(); ctx.ellipse(x - r * 0.66, y, r * 0.12, r * 0.3, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#5a3a4a'; ctx.lineWidth = 16; ctx.beginPath(); ctx.arc(x, y, r - 14, -1.1, 1.1); ctx.stroke();
+  for (const rd of RODS) {
+    const dead = rd.die < (o.dead || 0), c = Math.cos(rd.a), s = Math.sin(rd.a);
+    const drop = dead ? (o.drop || 0) * 10 : 0;
+    ctx.strokeStyle = dead ? 'rgba(110,120,140,.5)' : '#ff9db0'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x + c * (r - 26), y + s * (r - 26) + drop); ctx.lineTo(x + c * (r - 44), y + s * (r - 44) + drop); ctx.stroke();
+  }
+  for (let i = 0; i < 18; i++) {
+    const a = -0.95 + 1.9 * i / 17, px = x + Math.cos(a) * (r - 62), py = y + Math.sin(a) * (r - 62);
+    if (o.chr > i / 18) { glowDot(px, py, 26, C.amber, 0.5 + 0.5 * (o.lit || 0)); ctx.fillStyle = C.amber; }
+    else ctx.fillStyle = '#6f7d9c';
+    ctx.beginPath(); ctx.arc(px, py, 7, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// 金色奖章
+function medal(x, y, r) {
+  ctx.save();
+  const g = ctx.createRadialGradient(x - r * .3, y - r * .35, r * .1, x, y, r); g.addColorStop(0, '#fff1c2'); g.addColorStop(.55, '#e2b85a'); g.addColorStop(1, '#a8792a');
+  ctx.shadowColor = 'rgba(232,194,106,.6)'; ctx.shadowBlur = 40; ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0;
+  ctx.strokeStyle = 'rgba(120,80,20,.6)'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(x, y, r * .82, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+  txt('2026', x, y + 3, { size: r * .5, font: NUM, weight: 800, color: '#6b4a12' });
+}
+
+// DNA 双螺旋（横向）
+function helix(x0, x1, y, amp, t, hi = []) {
+  ctx.save(); ctx.lineWidth = 5;
+  for (let x = x0; x <= x1; x += 26) {
+    const ph = x * 0.022 - t * 1.6, a = Math.sin(ph) * amp, b = -a;
+    const h = hi.find(r => x >= r[0] && x <= r[1]);
+    ctx.strokeStyle = h ? h[2] : 'rgba(160,190,240,.35)'; ctx.beginPath(); ctx.moveTo(x, y + a); ctx.lineTo(x, y + b); ctx.stroke();
+  }
+  for (const [col, sg] of [[C.cyan, 1], [C.violet, -1]]) {
+    ctx.strokeStyle = col; ctx.beginPath();
+    for (let x = x0; x <= x1; x += 4) { const Y = y + sg * Math.sin(x * 0.022 - t * 1.6) * amp; x === x0 ? ctx.moveTo(x, Y) : ctx.lineTo(x, Y); }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ============ 场景 ============
+const scenes = {};
+
+scenes.hook = (t) => {
+  const tBeam = at('N1', '一束蓝光'), tWake = at('N1', '立刻醒来'), tSwap = at('N1', '换一群'), tFreeze = at('N1', '突然僵住'), tMem = at('N1', '像是想起');
+  const out = P(t, S0('N2') - 0.1, .5);
+  if (out < 1) {
+    ctx.save(); ctx.globalAlpha *= 1 - out; scaleAt(540, 950, lerp(1, .88, eo(out)));
+    const wake = P(t, tWake, .25), fear = P(t, tFreeze, .35);
+    const beam1 = P(t, tBeam + .3, .3) * (1 - P(t, tSwap - .1, .3)), beam2 = P(t, tSwap + .5, .3);
+    const jump = wake > 0 ? Math.sin(clamp((t - tWake) / .5) * Math.PI) * 70 : 0;
+    const shiver = fear > 0 ? Math.sin(t * 75) * 4 * fear : 0;
+    const fx = t < tSwap ? 135 : 165;
+    mouse(460 + shiver, 1040 - jump, 1.3, { asleep: wake <= 0, fear, fiber: P(t, tBeam - .2, .4), fiberX: fx, fiberTop: 540, beam: Math.max(beam1, beam2), beamCol: C.blue, whisk: wake > 0 && fear <= 0 ? Math.sin(t * 30) * .08 : 0 });
+    zzz(760, 870, t, 1 - P(t, tWake, .2));
+    pop(P(t, tWake, .35) * (1 - P(t, tSwap, .3)), s => { scaleAt(800, 830, s); txt('!', 800, 830, { size: 120, font: NUM, weight: 800, color: C.gold, glow: 'rgba(232,194,106,.6)' }); });
+    if (beam1 > 0) chip('照亮：掌管清醒的神经元', 540, 1290, { color: C.blue, alpha: beam1, size: 32 });
+    if (beam2 > 0) chip('照亮：恐惧记忆的神经元', 540, 1290, { color: C.red, alpha: beam2, size: 32 });
+    // 回忆气泡
+    const km = P(t, tMem, .4);
+    if (km > 0) {
+      ctx.save(); ctx.globalAlpha *= km;
+      ctx.fillStyle = 'rgba(60,16,24,.9)'; ctx.strokeStyle = C.red; ctx.lineWidth = 3;
+      for (const [bx, by, br] of [[770, 860, 14], [810, 810, 22]]) { ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }
+      rr(720, 640, 300, 130, 60); ctx.fill(); ctx.stroke();
+      ctx.restore();
+      txt('危险！', 870, 705, { size: 52, weight: 800, color: C.red, alpha: km });
+    }
+    ctx.restore();
+  }
+  // —— N2：光遗传学 · 诺奖 ——
+  const k = P(t, S0('N2'), .4);
+  if (k > 0) {
+    ctx.save(); ctx.globalAlpha *= k;
+    // 光 → 神经元 小图示
+    const kn = P(t, S0('N2') + .1, .5);
+    lightCone(540, 520, 760, 30, 200, C.blue, kn * (0.6 + 0.4 * Math.sin(t * 6)));
+    neuron(470, 780, .42, { glow: kn, color: '#9fb4e0' });
+    txt('用光，控制神经元', 540, 900, { size: 46, color: C.mute, alpha: kn });
+    const kt = P(t, at('N2', '光遗传学'), .45);
+    pop(kt, s => { scaleAt(540, 1010, s); txt('光遗传学', 540, 1010, { size: 128, weight: 800, color: C.cyan, glow: 'rgba(77,232,255,.55)', blur: 40 }); });
+    txt('Optogenetics', 540, 1110, { size: 48, font: NUM, weight: 700, color: C.text, alpha: P(t, at('N2', '光遗传学') + .3, .4) });
+    const km = P(t, at('N2', '2026'), .45);
+    pop(km, s => { scaleAt(540, 1265, s); medal(330, 1265, 78); rich([['诺贝尔', C.gold, CN, 46], ['生理学或医学奖', C.text, CN, 40]], 650, 1265, 44, { weight: 800 }); });
+    ctx.restore();
+  }
+};
+
+scenes.laureates = (t) => {
+  txt('获奖的有三位', 540, 540, { size: 44, color: C.mute, alpha: P(t, S0('N3'), .4) });
+  const L = [
+    { cn: '彼得·黑格曼', en: 'Peter Hegemann', meta: '1954 · 德国 · 柏林洪堡大学', ini: 'PH', col: C.green, t: at('N3', '彼得'), tag: '找到光控蛋白', tt: at('N3', '找到了') },
+    { cn: '格奥尔格·纳格尔', en: 'Georg Nagel', meta: '1953 · 德国 · 维尔茨堡大学', ini: 'GN', col: C.cyan, t: at('N3', '格奥尔格'), tag: '找到光控蛋白', tt: at('N3', '找到了') + .15 },
+    { cn: '卡尔·戴瑟罗斯', en: 'Karl Deisseroth', meta: '1971 · 美国 · 斯坦福大学', ini: 'KD', col: C.blue, t: at('N3', '卡尔'), tag: '做成神经开关', tt: at('N3', '变成了') },
+  ];
+  L.forEach((p, i) => {
+    const y = 610 + i * 232;
+    pop(P(t, p.t - .15, .4), s => {
+      scaleAt(540, y + 100, s);
+      panel(90, y, 900, 200, { stroke: p.col + '88' });
+      avatar(190, y + 100, 62, p.ini, p.col);
+      txt(p.cn, 290, y + 58, { size: 48, weight: 800, align: 'left' });
+      txt(p.en, 290, y + 110, { size: 32, font: NUM, weight: 600, align: 'left', color: p.col });
+      txt(p.meta, 290, y + 155, { size: 27, align: 'left', color: C.mute });
+    });
+    const kt = P(t, p.tt, .35);
+    pop(kt, s => { scaleAt(860, y + 58, s); chip(p.tag, 860, y + 58, { size: 26, color: p.col }); });
+  });
+  // 获奖理由
+  const kc = P(t, at('N3', '控制神经元'), .4);
+  pop(kc, s => { scaleAt(540, 1345, s); chip('获奖理由：光门控离子通道与光遗传学', 540, 1345, { size: 30, color: C.gold }); });
+};
+
+scenes.brain = (t) => {
+  const BX = 540, BY = 840, BS = 1.18;
+  const kIn = P(t, S0('N4'), .5), kType = P(t, at('N4', '挤在一起'), .6);
+  const tLit = at('N4', '哪里亮了'), tBad = at('N4', '哪里坏了'), tProve = at('N4', '很难证明');
+  const tEl = at('N5', '用电极'), tAll = at('N5', '一起激活'), tCrick = at('N5', '克里克'), tLight = at('N5', '精确地开关');
+  const kLit = P(t, tLit, .4) * (1 - P(t, tEl - .2, .4)), kBad = P(t, tBad, .4) * (1 - P(t, tEl - .2, .4));
+  const kEl = P(t, tEl, .5) * (1 - P(t, tCrick - .2, .4)), kAll = P(t, tAll, .3) * (1 - P(t, tCrick - .2, .4));
+  const kSel = P(t, tLight, .5), dimB = P(t, tCrick - .2, .4);
+  const tip = [30, -70];
+  ctx.save(); ctx.globalAlpha *= kIn; scaleAt(BX, BY, lerp(.94, 1, eo(kIn)));
+  brain(BX, BY, BS, {
+    glow: kSel > 0 ? 'rgba(61,155,255,.5)' : null,
+    inner: () => {
+      for (const p of BRAIN_PTS) {
+        let col = '#5d6d92', a = 0.75, r = 4.2;
+        if (kType > 0) { col = TYPES[p.ty]; a = lerp(.75, .9, kType); }
+        if (kLit > 0 && Math.hypot(p.x + 130, p.y + 60) < 110) { a = 1; r = 5.5; }
+        if (kBad > 0 && Math.hypot(p.x - 170, p.y - 40) < 95) { a = lerp(a, .12, kBad); }
+        if (kAll > 0 && Math.hypot(p.x - tip[0], p.y - tip[1]) < 150) { col = '#ffffff'; a = 1; r = 5.5 + Math.sin(t * 20 + p.ph) * 1.2; }
+        if (dimB > 0) a *= lerp(1, .5, dimB);
+        if (kSel > 0) { if (p.ty === 0) { col = '#bfe0ff'; a = 1; r = 5.5; } else a *= lerp(1, .3, kSel); }
+        ctx.globalAlpha = a; ctx.fillStyle = col; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      if (kLit > 0) { ctx.save(); ctx.globalAlpha = kLit; ctx.strokeStyle = C.gold; ctx.lineWidth = 5; ctx.setLineDash([12, 10]); ctx.beginPath(); ctx.arc(-130, -60, 115, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
+      if (kBad > 0) { ctx.save(); ctx.globalAlpha = kBad; ctx.strokeStyle = C.red; ctx.lineWidth = 8; ctx.beginPath(); ctx.moveTo(130, 0); ctx.lineTo(210, 80); ctx.moveTo(210, 0); ctx.lineTo(130, 80); ctx.stroke(); ctx.restore(); }
+      if (kAll > 0) glowDot(tip[0], tip[1], 170, '#ffffff', kAll * .35);
+      if (kSel > 0) { ctx.fillStyle = `rgba(61,155,255,${.12 * kSel})`; ctx.fillRect(-400, -300, 800, 600); }
+    }
+  });
+  ctx.restore();
+  // 标注
+  if (kLit > 0) chip('看到：哪里亮了', 300, 496, { color: C.gold, alpha: kLit, size: 28 });
+  if (kBad > 0) chip('看到：哪里坏了', 800, 496, { color: C.red, alpha: kBad, size: 28 });
+  // 电极
+  if (kEl > 0) {
+    const ex = BX + tip[0] * BS, ey = BY + tip[1] * BS, d = (1 - eo(kEl)) * 200;
+    ctx.save(); ctx.globalAlpha *= clamp(kEl * 2); ctx.strokeStyle = '#c8d2e6'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(ex + 160, 520 - d); ctx.lineTo(ex, ey - d); ctx.stroke(); ctx.restore();
+    txt('电极', ex + 190, 540, { size: 30, color: C.text, alpha: kEl, align: 'left' });
+  }
+  // 下方信息：九百亿 → 相关≠因果 → 电极一片 → 克里克
+  const kNum = P(t, at('N4', '九百亿'), .4) * (1 - P(t, tProve - .2, .3));
+  if (kNum > 0) pop(kNum, s => { scaleAt(540, 1270, s); rich([['≈ 900 亿', C.cyan, NUM, 92], [' 个神经元', C.text, CN, 44]], 540, 1270, 44, { weight: 800 }); });
+  const kPr = P(t, tProve, .4) * (1 - P(t, tEl - .2, .3));
+  if (kPr > 0) pop(kPr, s => { scaleAt(540, 1270, s); rich([['相关', C.text, CN, 66], ['  ≠  ', C.red, NUM, 66], ['因果', C.text, CN, 66]], 540, 1270, 66, { weight: 800 }); txt('哪群细胞导致了哪种行为？', 540, 1355, { size: 34, color: C.mute }); });
+  const kA = P(t, tAll, .35) * (1 - P(t, tCrick - .2, .3));
+  if (kA > 0) chip('不分类型，一起被激活', 540, 1290, { color: C.text, alpha: kA, size: 36 });
+  const kC = P(t, tCrick - .1, .45);
+  if (kC > 0) {
+    pop(kC, s => {
+      scaleAt(540, 1260, s);
+      panel(110, 1165, 860, 200, { stroke: 'rgba(232,194,106,.5)' });
+      avatar(205, 1265, 54, 'FC', C.gold);
+      txt('弗朗西斯·克里克', 290, 1222, { size: 38, weight: 800, align: 'left' });
+      txt('DNA 双螺旋发现者之一', 290, 1270, { size: 27, align: 'left', color: C.mute });
+      txt('“要是能用光……”', 290, 1322, { size: 34, weight: 700, align: 'left', color: C.blue, alpha: P(t, at('N5', '要是能用光'), .4) });
+    });
+    if (kSel > 0) chip('只点亮其中一类', 540, 496, { color: C.blue, alpha: kSel, size: 30 });
+  }
+};
+
+scenes.alga = (t) => {
+  const tLight = at('N6', '朝着光游'), tZoom = at('N6', '靠的是'), tSpot = at('N6', '橙色'), t90 = at('N6', '九十年代初'), tHalf = at('N6', '半毫秒'), tSig = at('N6', '电信号'), t20 = at('N6', '二十多倍');
+  const t7 = S0('N7') - .1, k7 = P(t, t7, .5);
+  // —— 培养皿里的衣藻群 ——
+  const kDish = P(t, S0('N6'), .5) * (1 - P(t, tZoom, .5));
+  const kL = P(t, tLight, .5);
+  if (kDish > 0) {
+    ctx.save(); ctx.globalAlpha *= kDish;
+    ctx.save(); ctx.beginPath(); ctx.arc(540, 900, 340, 0, Math.PI * 2); ctx.fillStyle = 'rgba(30,60,70,.45)'; ctx.fill(); ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(180,220,255,.4)'; ctx.stroke(); ctx.clip();
+    if (kL > 0) { const g = ctx.createLinearGradient(880, 0, 300, 0); g.addColorStop(0, `rgba(255,250,210,${.5 * kL})`); g.addColorStop(1, 'rgba(255,250,210,0)'); ctx.fillStyle = g; ctx.fillRect(200, 500, 700, 800); }
+    const R = rng(31);
+    for (let i = 0; i < 26; i++) {
+      const x0 = 260 + R() * 420, y0 = 640 + R() * 520, a0 = R() * 6.28, ph = R() * 6.28;
+      const move = eo(P(t, tLight + R() * .3, 3.5));
+      const x = x0 + Math.sin(t * .9 + ph) * 14 + move * (180 + R() * 60), y = y0 + Math.cos(t * .8 + ph) * 14 + move * (900 - y0) * .25;
+      const ang = lerp(a0 + Math.sin(t + ph) * .3, 0 + Math.sin(t * 2 + ph) * .15, eo(P(t, tLight, 1)));
+      alga(x, y, .55, ang, { ph: t * 12 + ph });
+    }
+    ctx.restore();
+    if (kL > 0) { glowDot(990, 900, 150, '#fff6c8', kL); txt('光', 990, 900, { size: 44, weight: 800, color: '#3a3000', alpha: kL }); }
+    txt('衣藻 Chlamydomonas', 540, 540, { size: 36, color: C.green, weight: 700 });
+    ctx.restore();
+  }
+  // —— 放大一只 ——
+  const kBig = P(t, tZoom - .2, .6) * (1 - k7);
+  if (kBig > 0) {
+    const mv = eio(P(t, t90, .8));
+    const x = lerp(540, 380, mv), y = lerp(860, 720, mv), s = lerp(3.2, 2.2, mv);
+    ctx.save(); ctx.globalAlpha *= clamp(kBig * 1.5);
+    const fl = P(t, tSig, .1) * (1 - P(t, tSig + .5, .5));
+    if (P(t, t90, .5) > 0) { // 一束光打到眼点
+      ctx.save(); ctx.globalAlpha *= P(t, t90 + .3, .4); ctx.strokeStyle = '#fff3b0'; ctx.lineWidth = 8; ctx.shadowColor = '#fff3b0'; ctx.shadowBlur = 20;
+      ctx.beginPath(); ctx.moveTo(x + 330, y - 220); ctx.lineTo(x + 12 * s * .9, y - 30 * s * .9); ctx.stroke(); ctx.restore();
+    }
+    alga(x, y, s, -0.15, { ph: t * 10, spot: P(t, tSpot, .4) * (0.6 + 0.4 * Math.sin(t * 5)) + fl * 2 });
+    const kS = P(t, tSpot, .4) * (1 - P(t, t90, .4));
+    if (kS > 0) {
+      const ex = x + (12 * Math.cos(-.15) + 30 * Math.sin(-.15)) * s, ey = y + (12 * Math.sin(-.15) - 30 * Math.cos(-.15)) * s;
+      ctx.save(); ctx.globalAlpha *= kS; ctx.strokeStyle = C.orange; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(ex + 160, ey - 110); ctx.stroke(); ctx.restore();
+      chip('眼点：感光', ex + 230, ey - 130, { color: C.orange, alpha: kS, size: 32 });
+    }
+    if (fl > 0) { txt('⚡', x + 140, y - 120, { size: 80, alpha: fl, color: C.gold }); }
+    const kE = P(t, tSig, .3);
+    if (kE > 0) chip('电信号', 800, 720, { color: C.gold, alpha: kE, size: 34 });
+    ctx.restore();
+    // 速度对比
+    const kb = P(t, tHalf - .2, .4);
+    if (kb > 0) {
+      ctx.save(); ctx.globalAlpha *= kb * (1 - k7);
+      panel(110, 1010, 860, 330, { fill: 'rgba(14,20,34,.94)' });
+      txt('从见光到出电信号', 540, 1055, { size: 30, color: C.mute });
+      const sc = 50, x0 = 300;   // 1 毫秒 = 50px
+      const g1 = eo(P(t, tHalf, .5)), g2 = eo(P(t, tHalf + .4, 1.4));
+      txt('衣藻', 260, 1135, { size: 36, weight: 700, align: 'right', color: C.green });
+      rr(x0, 1115, Math.max(4, .5 * sc * g1), 40, 8); ctx.fillStyle = C.green; ctx.fill();
+      txt('0.5 毫秒', x0 + 40, 1135, { size: 34, weight: 800, align: 'left', color: C.green, alpha: g1 });
+      txt('人眼', 260, 1215, { size: 36, weight: 700, align: 'right', color: C.text });
+      rr(x0, 1195, 10 * sc * g2, 40, 8); ctx.fillStyle = '#5a6684'; ctx.fill();
+      txt('≥ 10 毫秒', x0 + 10 * sc * g2 + 16, 1215, { size: 34, weight: 800, align: 'left', color: C.text, alpha: g2 });
+      ctx.restore();
+      const k20 = P(t, t20, .4) * (1 - k7);
+      pop(k20, s => { scaleAt(540, 1290, s); chip('快 20 多倍', 540, 1290, { color: C.gold, size: 36, fill: 'rgba(40,30,8,.95)' }); });
+    }
+  }
+  // —— N7：大胆猜测 ——
+  if (k7 > 0) {
+    ctx.save(); ctx.globalAlpha *= k7;
+    const tGuess = at('N7', '有一个蛋白'), tSense = at('N7', '自己就能感光'), tCh = at('N7', '让离子通过'), tNone = at('N7', '没人见过'), tDoubt = at('N7', '并不相信');
+    txt('大胆猜测', 540, 545, { size: 44, weight: 800, color: C.gold });
+    const my = 900;
+    membrane(110, 970, my, [540], 0, {});
+    // 神秘蛋白
+    const kq = P(t, tGuess, .4);
+    pop(kq, s => { scaleAt(540, my, s); ctx.save(); ctx.fillStyle = '#4a3a7a'; ctx.shadowColor = C.violet; ctx.shadowBlur = 30; rr(490, my - 70, 100, 140, 30); ctx.fill(); ctx.restore(); txt('?', 540, my + 4, { size: 90, font: NUM, weight: 800, color: C.text }); });
+    const ks = P(t, tSense, .4);
+    if (ks > 0) { lightCone(320, 600, my - 70, 20, 120, '#fff3b0', ks); chip('自己感光', 300, 640, { color: '#fff3b0', alpha: ks, size: 30 }); arrow(370, 690, 480, my - 60, '#fff3b0', 4, eo(ks)); }
+    const kc = P(t, tCh, .4);
+    if (kc > 0) { chip('又是通道', 790, 640, { color: '#ffd84a', alpha: kc, size: 30 }); for (let i = 0; i < 3; i++) ion(lerp(700, 560, (t * .5 + i / 3) % 1), my - 130 + i * 10, kc); arrow(760, 690, 600, my - 60, '#ffd84a', 4, eo(kc)); }
+    const k1 = P(t, tCh + .4, .4);
+    if (k1 > 0) txt('= 同一个蛋白？', 540, 1110, { size: 54, weight: 800, color: C.text, alpha: k1 });
+    const kn = P(t, tNone, .35);
+    pop(kn, s => { ctx.save(); ctx.translate(540, 1250); ctx.rotate(-0.08); ctx.scale(s, s); rr(-200, -50, 400, 100, 16); ctx.strokeStyle = C.red; ctx.lineWidth = 6; ctx.stroke(); txt('前所未见', 0, 2, { size: 56, weight: 800, color: C.red }); ctx.restore(); });
+    const kd = P(t, tDoubt, .3);
+    if (kd > 0) for (const [qx, qy, qs, d] of [[200, 1180, 70, 0], [880, 1170, 80, .1], [160, 760, 56, .2], [920, 780, 64, .3]]) pop(P(t, tDoubt + d, .3), s => { scaleAt(qx, qy, s); txt('?', qx, qy, { size: qs, font: NUM, weight: 800, color: C.mute }); });
+    ctx.restore();
+  }
+};
+
+scenes.frog = (t) => {
+  const tSeq = at('N8', '基因序列'), tTwo = at('N8', '两个可疑'), tNag = at('N8', '纳格尔'), tInj = at('N8', '注入'), tLight = at('N8', '光一照'), tOpen = at('N8', '通道就打开'), tIon = at('N8', '离子涌');
+  const k9 = P(t, S0('N9') - .1, .5);
+  const kMem = P(t, tLight - .2, .5);
+  // —— 基因 ——
+  const kDNA = P(t, S0('N8') + .3, .5) * (1 - kMem);
+  if (kDNA > 0) {
+    ctx.save(); ctx.globalAlpha *= kDNA;
+    chip('2000 年前后', 540, 545, { color: C.gold, size: 32 });
+    const k2 = P(t, tTwo, .4);
+    helix(90, 990, 680, 44, t * (P(t, tSeq, .3) ? 1 : 0.3), k2 > 0 ? [[300, 420, C.gold], [640, 760, C.gold]] : []);
+    if (P(t, tSeq, .4) > 0) txt('衣藻基因序列', 540, 770, { size: 30, color: C.mute, alpha: P(t, tSeq, .4) });
+    // 两个基因块：先在螺旋上，再飞进卵细胞
+    const fly = eio(P(t, tInj, 1.0));
+    for (const [i, gx] of [[0, 360], [1, 700]]) {
+      const kk = P(t, tTwo + i * .2, .35); if (kk <= 0) continue;
+      const X = lerp(gx, 520 + i * 40, fly), Y = lerp(680, 1020, fly) - Math.sin(fly * Math.PI) * 80;
+      pop(kk, s => { scaleAt(X, Y, s * lerp(1, .5, fly)); rr(X - 60, Y - 30, 120, 60, 14); ctx.fillStyle = 'rgba(48,36,10,.97)'; ctx.fill(); ctx.strokeStyle = C.gold; ctx.lineWidth = 3; ctx.stroke(); txt(`基因 ${i + 1}`, X, Y + 1, { size: 28, weight: 800, color: C.gold }); });
+    }
+    const kN = P(t, tNag, .4);
+    if (kN > 0) chip('交给纳格尔 · 研究离子通道', 540, 850, { color: C.cyan, alpha: kN * (1 - P(t, tInj, .3)), size: 30 });
+    // 青蛙卵细胞
+    const kE = P(t, tInj - .3, .4);
+    if (kE > 0) {
+      ctx.save(); ctx.globalAlpha *= kE;
+      ctx.save(); ctx.beginPath(); ctx.arc(540, 1080, 190, 0, Math.PI * 2); ctx.clip();
+      ctx.fillStyle = '#e8dcc0'; ctx.fillRect(330, 870, 420, 420); ctx.fillStyle = '#5b4031'; ctx.beginPath(); ctx.ellipse(540, 1000, 240, 150, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+      ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(540, 1080, 190, 0, Math.PI * 2); ctx.stroke();
+      // 注射针
+      const nd = 1 - eo(P(t, tInj, .6));
+      ctx.strokeStyle = '#c8d2e6'; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(900 + nd * 100, 880 - nd * 60); ctx.lineTo(660 + nd * 100, 1020 - nd * 60); ctx.stroke();
+      ctx.restore();
+      txt('青蛙卵细胞', 540, 1320, { size: 34, color: C.text, alpha: kE });
+    }
+    ctx.restore();
+  }
+  // —— 膜上的通道：光一照就开 ——
+  if (kMem > 0) {
+    ctx.save(); ctx.globalAlpha *= kMem * (1 - k9);
+    const my = 960, open = eo(P(t, tOpen, .5)), lit = P(t, tLight + .1, .3);
+    txt('放大：卵细胞的细胞膜', 540, 545, { size: 34, color: C.mute });
+    for (const cx of [270, 540, 810]) lightCone(cx, 600, my - 60, 30, 120, C.blue, lit * (0.7 + 0.3 * Math.sin(t * 7)));
+    txt('细胞外', 120, my - 120, { size: 28, align: 'left', color: C.mute });
+    txt('细胞内', 120, my + 130, { size: 28, align: 'left', color: C.mute });
+    membrane(90, 990, my, [270, 540, 810], open, {});
+    const ki = P(t, tIon - .6, .4);
+    for (const [i, cx] of [[0, 270], [1, 540], [2, 810]]) ionFlow(cx, my, t, ki > 0 ? 1 : 0, 50 + i);
+    if (open > 0) chip('通道打开', 540, 1230, { color: C.blue, alpha: open * (1 - P(t, tIon, .3)), size: 34 });
+    if (ki > 0) chip('带电离子涌入 → 电信号', 540, 1230, { color: '#ffd84a', alpha: P(t, tIon, .3), size: 34 });
+    ctx.restore();
+  }
+  // —— N9：2003 年论文 ——
+  if (k9 > 0) {
+    ctx.save(); ctx.globalAlpha *= k9;
+    const tTool = at('N9', '它可以成为');
+    pop(P(t, S0('N9'), .45), s => {
+      scaleAt(540, 760, s);
+      panel(120, 600, 840, 320, { stroke: 'rgba(61,155,255,.6)' });
+      chip('2003 · PNAS', 540, 660, { color: C.gold, size: 28 });
+      txt('通道视紫红质-2', 540, 760, { size: 70, weight: 800, color: C.text });
+      txt('Channelrhodopsin-2 · ChR2', 540, 850, { size: 38, font: NUM, weight: 700, color: C.blue });
+    });
+    const kt = P(t, tTool, .45);
+    if (kt > 0) {
+      const y = 1130;
+      ctx.save(); ctx.globalAlpha *= kt;
+      glowDot(200, y, 70, C.blue, 1); txt('蓝光', 200, y + 90, { size: 30, color: C.blue });
+      arrow(270, y, 420, y, C.mute, 5, eo(P(t, tTool + .2, .4)));
+      ctx.save(); ctx.globalAlpha *= P(t, tTool + .4, .3); ctx.fillStyle = C.blue; ctx.shadowColor = C.blue; ctx.shadowBlur = 20; rr(470, y - 56, 30, 112, 12); ctx.fill(); rr(520, y - 56, 30, 112, 12); ctx.fill(); ctx.restore();
+      txt('ChR2', 510, y + 90, { size: 30, font: NUM, weight: 800, color: C.blue, alpha: P(t, tTool + .4, .3) });
+      arrow(600, y, 750, y, C.mute, 5, eo(P(t, tTool + .7, .4)));
+      const ks = P(t, at('N9', '电信号'), .3);
+      if (ks > 0) { ctx.save(); ctx.globalAlpha *= ks; ctx.strokeStyle = C.gold; ctx.lineWidth = 6; ctx.lineJoin = 'round'; ctx.beginPath(); ctx.moveTo(790, y + 20); ctx.lineTo(830, y + 20); ctx.lineTo(850, y - 60); ctx.lineTo(875, y + 50); ctx.lineTo(895, y + 20); ctx.lineTo(940, y + 20); ctx.stroke(); ctx.restore(); txt('电信号', 865, y + 90, { size: 30, color: C.gold, alpha: ks }); }
+      ctx.restore();
+      txt('一个用光制造电信号的工具', 540, 1320, { size: 40, weight: 800, color: C.text, alpha: P(t, at('N9', '工具'), .4) });
+    }
+    ctx.restore();
+  }
+};
+
+scenes.neuron = (t) => {
+  // —— N10：精神科医生 ——
+  const k11 = P(t, S0('N11') - .1, .5);
+  const k10 = P(t, S0('N10'), .45) * (1 - k11);
+  if (k10 > 0) {
+    ctx.save(); ctx.globalAlpha *= k10;
+    pop(P(t, S0('N10'), .45), s => {
+      scaleAt(540, 620, s);
+      panel(110, 530, 860, 180, { stroke: 'rgba(61,155,255,.6)' });
+      avatar(210, 620, 58, 'KD', C.blue);
+      txt('卡尔·戴瑟罗斯', 300, 585, { size: 44, weight: 800, align: 'left' });
+      txt('精神科医生 · 神经科学家 · 斯坦福', 300, 645, { size: 28, align: 'left', color: C.mute });
+    });
+    const tWard = at('N10', '精神科病房'), tEff = at('N10', '治疗效果差'), tSide = at('N10', '副作用');
+    const kw = P(t, tWard, .4);
+    if (kw > 0) {
+      panel(110, 770, 860, 300, { fill: 'rgba(14,20,34,.94)' });
+      txt('当时的疗法', 540, 815, { size: 30, color: C.mute });
+      const g1 = eo(P(t, tEff, .6)), g2 = eo(P(t, tSide, .6));
+      txt('疗效', 260, 905, { size: 36, weight: 700, align: 'right' });
+      rr(290, 885, 600, 40, 10); ctx.fillStyle = C.dim; ctx.fill(); rr(290, 885, 600 * lerp(.6, .22, g1), 40, 10); ctx.fillStyle = C.red; ctx.fill();
+      txt('副作用', 260, 995, { size: 36, weight: 700, align: 'right' });
+      rr(290, 975, 600, 40, 10); ctx.fillStyle = C.dim; ctx.fill(); rr(290, 975, 600 * lerp(.3, .85, g2), 40, 10); ctx.fillStyle = C.amber; ctx.fill();
+      if (g1 > 0) txt('差', 290 + 600 * lerp(.6, .22, g1) + 20, 905, { size: 32, weight: 800, align: 'left', color: C.red, alpha: g1 });
+      if (g2 > 0) txt('大', 290 + 600 * lerp(.3, .85, g2) + 20, 995, { size: 32, weight: 800, align: 'left', color: C.amber, alpha: g2 });
+    }
+    const kb = P(t, at('N10', '弄懂活的大脑'), .45);
+    if (kb > 0) {
+      ctx.save(); ctx.globalAlpha *= kb;
+      brain(330, 1225, .36, { glow: 'rgba(61,155,255,.6)' });
+      txt('先弄懂', 720, 1190, { size: 40, weight: 700, color: C.mute });
+      txt('活的大脑', 720, 1255, { size: 56, weight: 800, color: C.blue });
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+  // —— N11：基因进神经元，蓝光一闪 ——
+  if (k11 > 0) {
+    ctx.save(); ctx.globalAlpha *= k11;
+    const tMail = at('N11', '写信'), tGene = at('N11', '要来'), tRat = at('N11', '大鼠的神经元'), t05 = at('N11', '2005'), tFlash = at('N11', '蓝光一闪'), tMs = at('N11', '精确到毫秒');
+    const kTop = 1 - P(t, tRat - .1, .4);
+    if (kTop > 0) {
+      ctx.save(); ctx.globalAlpha *= kTop;
+      chip('斯坦福 · 戴瑟罗斯', 270, 640, { color: C.blue, size: 30 });
+      chip('法兰克福 · 纳格尔', 810, 640, { color: C.cyan, size: 30 });
+      const m = eio(P(t, tMail, 1.0)), g = eio(P(t, tGene, 1.0));
+      if (m > 0 && m < 1) { const x = lerp(330, 750, m), y = 760 - Math.sin(m * Math.PI) * 80; rr(x - 45, y - 30, 90, 60, 8); ctx.fillStyle = '#e9eef8'; ctx.fill(); ctx.strokeStyle = '#7f8aa3'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x - 45, y - 30); ctx.lineTo(x, y + 4); ctx.lineTo(x + 45, y - 30); ctx.stroke(); }
+      if (g > 0) { const x = lerp(750, 330, g), y = 860 + Math.sin(g * Math.PI) * 60; helix(x - 80, x + 80, y, 18, t); txt('ChR2 基因', x, y + 50, { size: 26, color: C.gold }); }
+      ctx.restore();
+    }
+    const kn = P(t, tRat - .2, .5);
+    if (kn > 0) {
+      const pulses = []; const P0 = tFlash; for (let i = 0; i < 12; i++) pulses.push(P0 + i * 0.42);
+      const lastP = pulses.filter(p => p <= t).pop();
+      const fl = lastP !== undefined ? Math.max(0, 1 - (t - lastP) / 0.18) : 0;
+      ctx.save(); ctx.globalAlpha *= kn;
+      if (fl > 0) { glowDot(250, 860, 260, C.blue, fl * .9); lightCone(250, 520, 860, 40, 240, C.blue, fl); }
+      neuron(250, 860, 1, { chr: P(t, tRat + .3, 1.2), glow: fl, pulses: pulses.map(p => (t - p) / 0.6) });
+      txt('大鼠神经元', 470, 960, { size: 30, color: C.mute });
+      if (P(t, tRat + .3, .4) > 0) chip('装上 ChR2', 250, 655, { color: C.blue, size: 28, alpha: P(t, tRat + .3, .4) * (1 - P(t, tFlash, .3)) });
+      ctx.restore();
+      const kc = P(t, t05, .4);
+      if (kc > 0) chip('2005 · Nature Neuroscience', 540, 560, { color: C.gold, alpha: kc, size: 30 });
+      const ks = P(t, tFlash - .3, .4);
+      if (ks > 0) { ctx.save(); ctx.globalAlpha *= ks; scope(110, 1210, 860, 150, t, tFlash, pulses.map(p => p - tFlash), 4.6); ctx.restore(); }
+      const km = P(t, tMs, .4);
+      pop(km, s => { scaleAt(800, 1000, s); chip('一闪一发 · 毫秒级', 800, 1000, { color: C.cyan, size: 30, fill: 'rgba(8,30,40,.95)' }); });
+    }
+    ctx.restore();
+  }
+};
+
+scenes.mouse = (t) => {
+  const tW1 = at('N12', '光一亮'), tSame = at('N12', '同一年'), tWake = at('N12', '醒了'), tMem = S0('N13'), tTone = at('N13', '利根川进'), tRe = at('N13', '重新激活'), tFr = at('N13', '吓得');
+  // 时间线
+  const nodes = [['2007', '控制胡须', S0('N12')], ['2007', '唤醒小鼠', tSame], ['2012', '激活记忆', tMem]];
+  ctx.save(); ctx.strokeStyle = C.line; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(220, 560); ctx.lineTo(860, 560); ctx.stroke(); ctx.restore();
+  nodes.forEach(([y, l, tt], i) => {
+    const x = 220 + i * 320, on = P(t, tt - .1, .3), cur = on > 0 && (i === 2 || t < nodes[i + 1][2] - .1);
+    ctx.save(); ctx.beginPath(); ctx.arc(x, 560, cur ? 16 : 11, 0, Math.PI * 2); ctx.fillStyle = on > 0 ? (cur ? C.gold : '#9a8450') : C.dim; ctx.fill(); ctx.restore();
+    txt(y, x, 520, { size: 32, font: NUM, weight: 800, color: on > 0 ? C.gold : C.mute });
+    txt(l, x, 605, { size: 28, color: cur ? C.text : C.mute });
+  });
+  const part = t < tSame - .15 ? 0 : t < tMem - .2 ? 1 : 2;
+  const box = part === 2 ? P(t, tMem, .5) : 0;
+  let o = { fiber: 1, fiberTop: 660, beamCol: C.blue }, label = null, lc = C.blue;
+  if (part === 0) {
+    const b = P(t, tW1, .2); o.beam = b * (0.75 + 0.25 * Math.sin(t * 20)); o.whisk = b > 0 ? Math.sin(t * 38) * .3 : 0; o.fiberX = 120;
+    if (b > 0) label = '照亮运动区 → 胡须动';
+    chip('光纤', 730, 720, { color: C.mute, size: 26, alpha: 1 - b });
+  } else if (part === 1) {
+    const w = P(t, tWake, .25); o.asleep = w <= 0; o.beam = P(t, tSame + .6, .3); o.fiberX = 160;
+    label = w > 0 ? '照亮清醒神经元 → 醒来' : '照亮掌管清醒的神经元';
+  } else {
+    o.beam = P(t, tRe, .3); o.fear = P(t, tFr, .35); o.fiberX = 150; lc = C.red;
+    if (o.beam > 0) label = o.fear > 0 ? '小鼠吓得一动不动' : '激活恐惧记忆的神经元';
+  }
+  const jump = part === 1 && t > tWake ? Math.sin(clamp((t - tWake) / .5) * Math.PI) * 60 : 0;
+  const sh = o.fear > 0 ? Math.sin(t * 75) * 4 * o.fear : 0;
+  if (box > 0) {
+    ctx.save(); ctx.globalAlpha *= box; rr(120, 760, 840, 430, 30); ctx.fillStyle = 'rgba(121,224,138,.06)'; ctx.fill(); ctx.setLineDash([16, 12]); ctx.strokeStyle = C.green; ctx.lineWidth = 4; ctx.stroke(); ctx.restore();
+    txt('安全的箱子', 150, 1160, { size: 28, color: C.green, alpha: box, align: 'left' });
+  }
+  mouse(470 + sh, 1040 - jump, 1.1, o);
+  if (part === 1) zzz(740, 900, t, 1 - P(t, tWake, .2));
+  if (part === 2 && o.beam > 0) {
+    // 记忆印迹：一小簇神经元亮起
+    ctx.save(); ctx.globalAlpha *= o.beam;
+    ctx.fillStyle = 'rgba(60,16,24,.9)'; ctx.strokeStyle = C.red; ctx.lineWidth = 3;
+    for (const [bx, by, br] of [[690, 880, 12], [730, 840, 18]]) { ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }
+    rr(700, 700, 250, 120, 50); ctx.fill(); ctx.stroke();
+    const R = rng(77); for (let i = 0; i < 14; i++) { const x = 740 + R() * 170, y = 725 + R() * 70; glowDot(x, y, 14, C.red, .8); ctx.fillStyle = '#ffd0d6'; ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill(); }
+    ctx.restore();
+  }
+  if (part === 2) { const kt = P(t, tTone, .4); if (kt > 0) chip('合作：利根川进（1987 年诺奖得主）', 540, 1240, { color: C.gold, size: 28, alpha: kt * (1 - P(t, tRe, .3)) }); }
+  if (label) chip(label, 540, 1310, { color: lc, size: 34, fill: 'rgba(10,16,30,.95)' });
+};
+
+scenes.why = (t) => {
+  const tType = at('N14', '特定类型'), tSw = at('N14', '装上光控开关'), tOn = at('N14', '想开就开'), tOff = at('N14', '想关就关'), tQ = at('N14', '第一次能直接回答'), tCause = at('N14', '导致了');
+  const k15 = P(t, S0('N15') - .1, .5);
+  const kF = P(t, S0('N14'), .5) * (1 - k15);
+  if (kF > 0) {
+    ctx.save(); ctx.globalAlpha *= kF;
+    const R = rng(41), cells = [];
+    for (let n = 0; cells.length < 70 && n < 3000; n++) { const x = 150 + R() * 780, y = 600 + R() * 360; if (cells.every(c => Math.hypot(c.x - x, c.y - y) > 44)) cells.push({ x, y, ty: Math.floor(R() * 4), ph: R() * 6 }); }
+    panel(110, 570, 860, 420, { fill: 'rgba(14,20,34,.7)' });
+    const sel = P(t, tType, .4), on = P(t, tOn, .3) * (1 - P(t, tOff, .3)), off = P(t, tOff, .3) * (1 - P(t, tQ, .4));
+    if (on > 0) lightCone(540, 470, 990, 300, 860, C.blue, on * .6);
+    if (off > 0) lightCone(540, 470, 990, 300, 860, C.amber, off * .5);
+    for (const c of cells) {
+      let col = TYPES[c.ty], a = .8, r = 13;
+      if (c.ty === 0) {
+        if (on > 0) { glowDot(c.x, c.y, 40, C.blue, on); col = '#e4f2ff'; a = 1; r = 15; }
+        if (off > 0) { col = '#2a3550'; a = 1; }
+      } else a *= lerp(1, .55, sel);
+      ctx.save(); ctx.globalAlpha *= a; ctx.fillStyle = col; ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+      if (c.ty === 0 && sel > 0) { ctx.save(); ctx.globalAlpha *= sel; ctx.strokeStyle = C.cyan; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(c.x, c.y, 22, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
+    }
+    if (sel > 0) chip(P(t, tSw, .3) > 0 ? '只给这一类装上光控开关' : '只选一类神经元', 540, 1040, { color: C.cyan, alpha: sel * (1 - P(t, tOn - .45, .25)), size: 30 });
+    // 开关
+    const kt = P(t, tOn - .2, .3);
+    if (kt > 0) {
+      ctx.save(); ctx.globalAlpha *= kt * (1 - P(t, tQ, .4));
+      const pill = (x, label, col, active) => { rr(x - 170, 1010, 340, 64, 32); ctx.fillStyle = active ? col + '44' : 'rgba(20,28,46,.9)'; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = active ? col : C.line; ctx.stroke(); txt(label, x, 1043, { size: 32, weight: 800, color: active ? col : C.mute }); };
+      pill(330, '开 · 蓝光', C.blue, on > .5); pill(750, '关 · 黄光', C.amber, off > .5);
+      ctx.restore();
+    }
+    const kq = P(t, tQ, .4);
+    if (kq > 0) {
+      ctx.save(); ctx.globalAlpha *= kq;
+      panel(110, 1150, 860, 210, { stroke: 'rgba(232,194,106,.6)' });
+      txt('第一次能直接验证因果', 540, 1200, { size: 32, color: C.gold, weight: 700 });
+      const kc = P(t, tCause - .3, .4);
+      chip('这群细胞', 300, 1290, { color: C.blue, size: 36 });
+      arrow(420, 1290, 650, 1290, C.gold, 6, eo(kc));
+      chip('这个行为', 780, 1290, { color: C.text, size: 36, alpha: kc });
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+  // —— N15：回路与疾病 ——
+  if (k15 > 0) {
+    ctx.save(); ctx.globalAlpha *= k15;
+    txt('找到的神经回路', 540, 560, { size: 40, weight: 800, color: C.cyan });
+    const A = [['疼痛', 0], ['口渴', 0], ['进食', 0], ['奖赏', 1], ['社交', 1]];
+    const xs0 = [240, 540, 840], xs1 = [390, 690];
+    A.forEach(([w, row], i) => { const x = row ? xs1[i - 3] : xs0[i], y = 660 + row * 110; pop(P(t, at('N15', w) - .1, .35), s => { scaleAt(x, y, s); chip(w, x, y, { color: C.cyan, size: 44, fill: 'rgba(77,232,255,.12)' }); }); });
+    const kd = P(t, at('N15', '重新理解'), .4);
+    txt('重新理解的疾病', 540, 970, { size: 40, weight: 800, color: C.violet, alpha: kd });
+    const D = [['抑郁', 240, 1070], ['焦虑', 540, 1070], ['帕金森', 840, 1070], ['阿尔茨海默病', 540, 1180]];
+    D.forEach(([w, x, y]) => pop(P(t, at('N15', w) - .1, .35), s => { scaleAt(x, y, s); chip(w, x, y, { color: C.violet, size: 44, fill: 'rgba(179,145,255,.12)' }); }));
+    ctx.restore();
+  }
+};
+
+scenes.clinic = (t) => {
+  const tBed = S0('N16'), tRP = at('N16', '视网膜色素变性'), tDie = at('N16', '死掉'), tProt = at('N16', '光敏蛋白'), tSend = at('N16', '送进'), tGl = at('N16', '发光眼镜'), tSee = at('N16', '部分恢复'), tObj = at('N16', '分辨并抓起');
+  pop(P(t, tBed, .4), s => { scaleAt(540, 545, s); chip('走向临床试验', 540, 545, { color: C.gold, size: 32 }); });
+  const EX = 640, EY = 880, ER = 220;
+  const kE = P(t, tRP - .3, .5);
+  if (kE <= 0) return;
+  ctx.save(); ctx.globalAlpha *= kE;
+  const dead = eo(P(t, tDie, 1.0)), chr = P(t, tSend + .2, 1.2), see = P(t, tSee, .6);
+  // 眼镜发出的光
+  const kg = P(t, tGl, .4);
+  if (see > 0) {
+    const pulse = 0.7 + 0.3 * Math.sin(t * 8);
+    ctx.save(); ctx.globalAlpha *= see * pulse; ctx.strokeStyle = C.amber; ctx.lineWidth = 4; ctx.shadowColor = C.amber; ctx.shadowBlur = 16;
+    for (let i = -2; i <= 2; i++) { const yy = EY + i * 34, lx = EX - ER * .66, ta = i * 0.38; ctx.beginPath(); ctx.moveTo(260, yy); ctx.lineTo(lx, EY + i * 12); ctx.lineTo(EX + Math.cos(-ta) * (ER - 62), EY - Math.sin(-ta) * (ER - 62) * -1); ctx.stroke(); }
+    ctx.restore();
+  }
+  eyeball(EX, EY, ER, { dead, drop: dead, chr, lit: see > 0 ? 0.6 + 0.4 * Math.sin(t * 8) : 0 });
+  // 标注
+  const kr = P(t, tRP, .4) * (1 - P(t, tDie - .1, .3));
+  if (kr > 0) { ctx.save(); ctx.globalAlpha *= kr; ctx.strokeStyle = '#ff9db0'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(EX + 150, EY - 150); ctx.lineTo(EX + 230, EY - 250); ctx.stroke(); ctx.restore(); chip('视网膜 · 感光细胞', EX + 160, EY - 262, { color: '#ff9db0', alpha: kr, size: 28 }); }
+  if (dead > 0) chip('感光细胞死掉 → 失明', 540, 1180, { color: C.red, alpha: P(t, tDie, .3) * (1 - P(t, tProt, .3)), size: 32 });
+  // 注射
+  const ki = P(t, tSend - .3, .5) * (1 - P(t, tGl, .4));
+  if (ki > 0) {
+    ctx.save(); ctx.globalAlpha *= ki; const d = (1 - eo(P(t, tSend - .3, .6))) * 80;
+    ctx.strokeStyle = '#c8d2e6'; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(EX + 340 + d, EY - 300 - d); ctx.lineTo(EX + 120 + d, EY - 90 - d); ctx.stroke(); ctx.restore();
+  }
+  if (P(t, tProt, .3) > 0) chip('送入光敏蛋白', 540, 1180, { color: C.amber, alpha: P(t, tProt, .3) * (1 - P(t, tGl, .3)), size: 32 });
+  // 眼镜
+  if (kg > 0) {
+    ctx.save(); ctx.globalAlpha *= kg; rr(190, EY - 120, 60, 240, 24); ctx.fillStyle = '#1d2740'; ctx.fill(); ctx.strokeStyle = '#c8d2e6'; ctx.lineWidth = 4; ctx.stroke();
+    glowDot(220, EY, 90, C.amber, .6 + .3 * Math.sin(t * 8)); ctx.restore();
+    txt('特制发光眼镜', 220, EY + 170, { size: 28, color: C.amber, alpha: kg });
+  }
+  ctx.restore();
+  // 桌上的物体
+  const ko = P(t, tObj - .4, .4);
+  if (ko > 0) {
+    ctx.save(); ctx.globalAlpha *= ko;
+    ctx.strokeStyle = '#8d98b0'; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(260, 1330); ctx.lineTo(820, 1330); ctx.stroke();
+    ctx.fillStyle = '#c9d3e8'; rr(380, 1225, 70, 105, 10); ctx.fill(); ctx.strokeStyle = '#c9d3e8'; ctx.lineWidth = 8; ctx.beginPath(); ctx.arc(455, 1275, 24, -Math.PI / 2, Math.PI / 2); ctx.stroke();
+    ctx.fillStyle = '#9fb0d0'; rr(600, 1245, 110, 85, 8); ctx.fill();
+    const h = P(t, tObj, .4);
+    ctx.setLineDash([10, 8]); ctx.strokeStyle = C.amber; ctx.lineWidth = 4; ctx.globalAlpha *= h;
+    rr(360, 1205, 140, 140, 14); ctx.stroke(); rr(582, 1225, 146, 120, 14); ctx.stroke();
+    ctx.restore();
+    txt('部分恢复视觉', 540, 1385, { size: 30, color: C.amber, alpha: P(t, tObj, .4) });
+  } else if (see > 0) chip('部分恢复视觉', 540, 1180, { color: C.amber, alpha: see, size: 32 });
+};
+
+scenes.outro = (t) => {
+  const t30 = at('N17', '三十多年前'), tQ = at('N17', '为什么会游向光'), tCur = at('N17', '好奇心'), tBr = at('N17', '照亮了大脑');
+  const kB = P(t, tCur, .6);
+  // 光源
+  const k = P(t, S0('N17'), .6);
+  glowDot(540, 600, lerp(160, 260, kB), kB > 0 ? '#bfe0ff' : '#fff6c8', k * .9);
+  // 小绿藻游向光
+  const ka = k * (1 - kB);
+  if (ka > 0) {
+    ctx.save(); ctx.globalAlpha *= ka;
+    const p = eo(P(t, S0('N17'), 9));
+    alga(540 + Math.sin(t * 1.4) * 20, lerp(1150, 860, p), 1.6, -Math.PI / 2 + Math.sin(t * 2) * .12, { ph: t * 11, spot: .6 });
+    ctx.restore();
+  }
+  const k30 = P(t, t30, .4) * (1 - kB);
+  if (k30 > 0) txt('三十多年前，一个看似没用的问题', 540, 1230, { size: 40, color: C.mute, alpha: k30 });
+  const kq = P(t, tQ, .45) * (1 - kB);
+  pop(kq, s => { scaleAt(540, 1320, s); txt('绿藻为什么会游向光？', 540, 1320, { size: 60, weight: 800, color: C.green, glow: 'rgba(121,224,138,.4)' }); });
+  // 大脑被照亮
+  if (kB > 0) {
+    ctx.save(); ctx.globalAlpha *= kB;
+    brain(540, 870, .8, { glow: 'rgba(61,155,255,.8)', fill: '#1b3260', inner: () => { for (const p of BRAIN_PTS) { if (p.ty) continue; const a = .5 + .5 * Math.sin(t * 3 + p.ph); ctx.fillStyle = `rgba(160,210,255,${a})`; ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, Math.PI * 2); ctx.fill(); } } });
+    ctx.restore();
+    txt('好奇心', 540, 1180, { size: 54, weight: 700, color: C.text, alpha: kB });
+    const kl = P(t, tBr, .45);
+    pop(kl, s => { scaleAt(540, 1275, s); txt('最后照亮了大脑', 540, 1275, { size: 72, weight: 800, color: C.gold, glow: 'rgba(232,194,106,.5)' }); });
+    txt('资料：NobelPrize.org 新闻稿与科普背景', 540, 1370, { size: 26, color: C.mute, alpha: P(t, S1('N17') + .2, .5) });
+  }
+};
+
+// ============ 音效事件（导出给混音） ============
+function sfxEvents() {
+  const E = [];
+  SCENES.forEach((s, i) => { if (i) E.push({ t: s.a, n: 'whoosh' }); });
+  E.push(
+    { t: at('N1', '一束蓝光') + .3, n: 'zap' }, { t: at('N1', '立刻醒来'), n: 'pop' }, { t: at('N1', '换一群') + .5, n: 'zap' }, { t: at('N1', '突然僵住'), n: 'down' },
+    { t: at('N2', '光遗传学'), n: 'rise' }, { t: at('N2', '2026'), n: 'hit' },
+    { t: at('N3', '彼得') - .15, n: 'pop' }, { t: at('N3', '格奥尔格') - .15, n: 'pop' }, { t: at('N3', '卡尔') - .15, n: 'pop' }, { t: at('N3', '控制神经元'), n: 'tick' },
+    { t: at('N4', '九百亿'), n: 'pop' }, { t: at('N4', '很难证明'), n: 'down' }, { t: at('N5', '一起激活'), n: 'zap' }, { t: at('N5', '克里克') - .1, n: 'pop' }, { t: at('N5', '精确地开关'), n: 'rise' },
+    { t: at('N6', '朝着光游'), n: 'swish' }, { t: at('N6', '橙色'), n: 'pop' }, { t: at('N6', '电信号'), n: 'zap' }, { t: at('N6', '二十多倍'), n: 'hit' },
+    { t: at('N7', '有一个蛋白'), n: 'pop' }, { t: at('N7', '没人见过'), n: 'hit' },
+    { t: at('N8', '两个可疑'), n: 'tick' }, { t: at('N8', '注入'), n: 'swish' }, { t: at('N8', '光一照') + .1, n: 'zap' }, { t: at('N8', '通道就打开'), n: 'pop' },
+    { t: S0('N9'), n: 'pop' }, { t: at('N9', '电信号'), n: 'zap' },
+    { t: S0('N10'), n: 'pop' }, { t: at('N10', '治疗效果差'), n: 'down' },
+    { t: at('N11', '写信'), n: 'swish' }, { t: at('N11', '2005'), n: 'tick' },
+    { t: at('N12', '光一亮'), n: 'zap' }, { t: at('N12', '醒了'), n: 'pop' }, { t: at('N13', '重新激活'), n: 'zap' }, { t: at('N13', '吓得'), n: 'down' },
+    { t: at('N14', '想开就开'), n: 'zap' }, { t: at('N14', '想关就关'), n: 'down' }, { t: at('N14', '导致了') - .3, n: 'hit' },
+    ...['疼痛', '口渴', '进食', '奖赏', '社交', '抑郁', '焦虑', '帕金森', '阿尔茨海默病'].map(w => ({ t: at('N15', w) - .1, n: 'tick' })),
+    { t: at('N16', '死掉'), n: 'down' }, { t: at('N16', '送进'), n: 'swish' }, { t: at('N16', '部分恢复'), n: 'rise' },
+    { t: at('N17', '为什么会游向光'), n: 'pop' }, { t: at('N17', '照亮了大脑'), n: 'hit' });
+  // 神经元：蓝光脉冲
+  const tf = at('N11', '蓝光一闪'); for (let i = 0; i < 12; i++) if (tf + i * .42 < S1('N11') + .3) E.push({ t: tf + i * .42, n: 'tick' });
+  return E.sort((a, b) => a.t - b.t);
+}
+window.sfxEvents = sfxEvents;
+
+// ============ 合成 ============
+function frameAt(t) {
+  background(t);
+  for (const s of SCENES) {
+    const fadeIn = s.a === 0 ? 1 : P(t, s.a, 0.35), fadeOut = 1 - P(t, s.b, 0.3);
+    if (t < s.a || t > s.b + 0.3) continue;
+    ctx.save(); ctx.globalAlpha = fadeIn * fadeOut; ctx.translate(0, (1 - eo(fadeIn)) * 40);
+    scenes[s.name](t); ctx.restore();
+  }
+  headline(t);
+  subtitles(t);
+}
+
+function cover() {
+  background(3);
+  txt('2026 诺贝尔生理学或医学奖', 540, 250, { size: 46, color: C.gold, weight: 800 });
+  txt('一束光', 540, 420, { size: 150, weight: 800, color: C.blue, glow: 'rgba(61,155,255,.7)', blur: 50 });
+  txt('打开大脑的开关', 540, 580, { size: 110, weight: 800, color: C.text });
+  lightCone(615, 680, 950, 40, 260, C.blue, 1);
+  mouse(470, 1130, 1.25, { fiber: 1, fiberX: 115, fiberTop: 680, beam: 1, beamCol: C.blue });
+  txt('光遗传学 · Optogenetics', 540, 1440, { size: 64, weight: 800, color: C.cyan, glow: 'rgba(77,232,255,.4)' });
+  txt('从一种绿藻，到控制神经元', 540, 1540, { size: 46, weight: 700, color: C.mute });
+}
+
+window.renderFrame = (i) => frameAt(i / FPS);
+window.renderCover = cover;
+window.TOTAL_FRAMES = Math.round(TL.total * FPS);
+
+const q = new URLSearchParams(location.search);
+(async () => {
+  await Promise.all([`800 40px ${CN}`, `700 40px ${CN}`, `600 40px ${CN}`, `800 40px ${NUM}`].map(f => document.fonts.load(f, '光遗传学0123')));
+  if (q.get('mode') === 'render') { document.getElementById('bar').remove(); window.__ready = true; return; }
+  const audio = new Audio(q.get('audio') || 'audio/vo.wav'); let playing = false;
+  const seek = document.getElementById('seek'), clock = document.getElementById('clock');
+  document.getElementById('play').onclick = () => { playing = !playing; playing ? audio.play() : audio.pause(); };
+  seek.oninput = () => { audio.currentTime = seek.value / 1000 * TL.total; };
+  (function loop() { const t = audio.currentTime; frameAt(t); clock.textContent = t.toFixed(2); if (!seek.matches(':active')) seek.value = t / TL.total * 1000; requestAnimationFrame(loop); })();
+  window.__ready = true;
+})();
+</script>
+</body>
+</html>

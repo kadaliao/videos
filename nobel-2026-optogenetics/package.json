@@ -1,0 +1,1 @@
+{ "name": "nobel-2026-optogenetics-video", "private": true, "type": "module", "devDependencies": { "playwright": "1.63.0" } }
