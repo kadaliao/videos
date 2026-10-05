@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>把矩阵倒过来乘</title>
+<style>
+  html, body { margin: 0; background: #05070d; }
+  canvas { display: block; width: min(100vw, calc(100vh * 9 / 16)); height: auto; margin: 0 auto; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 8px; padding: 8px; background: #0008; color: #ccd; font: 13px/1.4 -apple-system, sans-serif; }
+  #bar input { flex: 1; }
+</style>
+</head>
+<body>
+<canvas id="stage" width="1080" height="1920"></canvas>
+<div id="bar"><button id="play">播放</button><input id="seek" type="range" min="0" max="1000" value="0"><span id="clock">0.00</span></div>
+<script src="build/timeline.js"></script>
+<script>
+// ============ 基础 ============
+const W = 1080, H = 1920, FPS = 30;
+const cv = document.getElementById('stage'), ctx = cv.getContext('2d');
+const C = {
+  bg: '#0a0e18', grid: 'rgba(120,150,210,0.07)', text: '#f2f5fa', mute: '#8a96ad', dim: '#2a3346',
+  cyan: '#3ee6ff', amber: '#ffb020', red: '#ff5a5f', green: '#5cff9d', violet: '#a98bff', panel: 'rgba(22,30,48,0.92)', line: 'rgba(140,170,230,0.22)'
+};
+const CN = '"PingFang SC", "Hiragino Sans GB", sans-serif';
+const NUM = '"Avenir Next", "Helvetica Neue", sans-serif';
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const eo = k => 1 - Math.pow(1 - clamp(k), 3);
+const eio = k => { k = clamp(k); return k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2; };
+const eb = k => { k = clamp(k); const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(k - 1, 3) + c1 * Math.pow(k - 1, 2); };
+const P = (t, a, d = 0.4) => clamp((t - a) / d);
+
+// ============ 时间轴：按口播字对齐 ============
+const TL = window.TL;
+const SEG = Object.fromEntries(TL.segments.map(s => [s.id, s]));
+const PUN = /[，。！？、；：“”‘’（）《》,.!?;:()"'·…—\-%\s]/g;
+function at(id, phrase, k = 0, end = false) {
+  const s = SEG[id]; const ph = phrase.replace(PUN, '');
+  let pos = -1; for (let i = 0; i <= k; i++) pos = s.clean.indexOf(ph, pos + 1);
+  if (pos < 0) { console.warn('phrase not found', id, phrase); return s.start; }
+  if (end) { const j = Math.min(s.ct.length - 1, pos + ph.length); return s.start + (pos + ph.length >= s.ct.length ? s.dur : s.ct[j]); }
+  return s.start + s.ct[pos];
+}
+const atE = (id, ph, k = 0) => at(id, ph, k, true);
+const S0 = id => SEG[id].start, S1 = id => SEG[id].start + SEG[id].dur;
+
+// 场景：从第一段开始前 0.25s 起，到下一场景开始
+const SCENES = [];
+for (const s of TL.segments) {
+  const last = SCENES[SCENES.length - 1];
+  if (!last || last.name !== s.scene) SCENES.push({ name: s.scene, a: Math.max(0, s.start - 0.25) });
+}
+SCENES.forEach((s, i) => s.b = i + 1 < SCENES.length ? SCENES[i + 1].a : TL.total);
+SCENES[0].a = 0;
+
+// ============ 绘图工具 ============
+function rr(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+function txt(s, x, y, o = {}) {
+  ctx.save();
+  ctx.font = `${o.weight || 600} ${o.size || 48}px ${o.font || CN}`;
+  ctx.textAlign = o.align || 'center'; ctx.textBaseline = o.base || 'middle';
+  if (o.alpha !== undefined) ctx.globalAlpha *= o.alpha;
+  if (o.glow) { ctx.shadowColor = o.glow; ctx.shadowBlur = o.blur || 30; }
+  if (o.stroke) { ctx.lineJoin = 'round'; ctx.lineWidth = o.stroke; ctx.strokeStyle = o.strokeColor || 'rgba(0,0,0,.85)'; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = o.color || C.text; ctx.fillText(s, x, y);
+  ctx.restore();
+}
+// 富文本一行：[[文本, 颜色, 字体?, 字号?, 上标?]]，整体居中
+function rich(parts, cx, y, size, o = {}) {
+  ctx.save(); ctx.textBaseline = 'middle';
+  const font = p => `${o.weight || 700} ${(p[3] || size)}px ${p[2] || o.font || CN}`;
+  let w = 0; for (const p of parts) { ctx.font = font(p); w += ctx.measureText(p[0]).width; }
+  let x = cx - w / 2;
+  for (const p of parts) {
+    ctx.font = font(p); const pw = ctx.measureText(p[0]).width;
+    if (o.glow) { ctx.shadowColor = o.glow; ctx.shadowBlur = 24; }
+    if (o.stroke) { ctx.lineJoin = 'round'; ctx.lineWidth = o.stroke; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.strokeText(p[0], x, y + (p[4] || 0)); }
+    ctx.fillStyle = p[1] || C.text; ctx.fillText(p[0], x, y + (p[4] || 0)); x += pw;
+  }
+  ctx.restore(); return w;
+}
+function panel(x, y, w, h, o = {}) {
+  ctx.save(); rr(x, y, w, h, o.r || 28);
+  ctx.fillStyle = o.fill || C.panel; ctx.fill();
+  ctx.lineWidth = o.lw || 2; ctx.strokeStyle = o.stroke || C.line; ctx.stroke(); ctx.restore();
+}
+function chip(s, x, y, o = {}) {
+  ctx.save(); if (o.alpha !== undefined) ctx.globalAlpha *= o.alpha; ctx.font = `${o.weight || 600} ${o.size || 30}px ${CN}`;
+  const w = ctx.measureText(s).width + (o.pad || 28) * 2, h = (o.size || 30) * 1.75;
+  const X = o.align === 'left' ? x : x - w / 2;
+  rr(X, y - h / 2, w, h, h / 2); ctx.fillStyle = o.fill || 'rgba(62,230,255,.14)'; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = o.color || C.cyan; ctx.stroke();
+  ctx.fillStyle = o.color || C.cyan; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(s, X + w / 2, y + 1);
+  ctx.restore(); return w;
+}
+function pop(k, f) { // 弹出缩放
+  if (k <= 0) return; ctx.save(); ctx.globalAlpha *= clamp(k * 2.5); f(eb(k)); ctx.restore();
+}
+function scaleAt(x, y, s) { ctx.translate(x, y); ctx.scale(s, s); ctx.translate(-x, -y); }
+function arrow(x1, y1, x2, y2, color, lw = 6, k = 1) {
+  const x = lerp(x1, x2, k), y = lerp(y1, y2, k);
+  ctx.save(); ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = lw; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x, y); ctx.stroke();
+  const a = Math.atan2(y2 - y1, x2 - x1), s = lw * 3.2;
+  ctx.beginPath(); ctx.moveTo(x + Math.cos(a) * s * .6, y + Math.sin(a) * s * .6);
+  ctx.lineTo(x - Math.cos(a - .55) * s, y - Math.sin(a - .55) * s); ctx.lineTo(x - Math.cos(a + .55) * s, y - Math.sin(a + .55) * s); ctx.fill();
+  ctx.restore();
+}
+function counter(v, d = 1) { return v.toFixed(d); }
+
+// ============ 背景与常驻元素 ============
+function background(t) {
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(540 + Math.sin(t * .3) * 120, 820, 50, 540, 820, 1100);
+  g.addColorStop(0, 'rgba(40,90,170,0.28)'); g.addColorStop(1, 'rgba(10,14,24,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+  const off = (t * 12) % 60;
+  for (let x = 0; x <= W; x += 60) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = -60 + off; y <= H; y += 60) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  // 下方暗角，托住字幕
+  const v = ctx.createLinearGradient(0, 1300, 0, H); v.addColorStop(0, 'rgba(5,7,13,0)'); v.addColorStop(1, 'rgba(5,7,13,0.85)');
+  ctx.fillStyle = v; ctx.fillRect(0, 1300, W, H - 1300);
+}
+
+function headline(t) {
+  // 常驻大标题：静音刷到也能看懂
+  const k1 = 1, k2 = P(t, at('N2', '把矩阵'), 0.35);
+  ctx.save();
+  txt('DeepSeek · DeepGEMM 开源库', 540, 200, { size: 30, weight: 600, color: C.mute });
+  rich([['顶级显卡 ', C.text], ['87.5%', C.red, NUM, 84], [' 在空转？', C.text]], 540, 290, 76, { weight: 800, stroke: 0 });
+  ctx.globalAlpha = k2; ctx.save(); scaleAt(540, 392, lerp(1.25, 1, eo(k2)));
+  rich([['DeepSeek：', C.amber], ['把矩阵倒过来乘', C.amber]], 540, 392, 62, { weight: 800 });
+  ctx.restore(); ctx.restore();
+  ctx.save(); ctx.strokeStyle = 'rgba(255,176,32,.35)'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(540 - 300 * eo(k2), 448); ctx.lineTo(540 + 300 * eo(k2), 448); ctx.stroke(); ctx.restore();
+}
+
+function subtitles(t) {
+  const c = TL.cues.find(c => t >= c.a && t < c.b + 0.02);
+  if (!c) return;
+  const k = P(t, c.a, 0.12);
+  // 数字、百分比、英文术语高亮
+  const parts = []; const re = /(\d[\d.]*%?|[A-Za-z][A-Za-z0-9.\-]*)/g; let last = 0, m;
+  while ((m = re.exec(c.text))) { if (m.index > last) parts.push([c.text.slice(last, m.index), '#ffffff']); parts.push([m[0], C.amber]); last = m.index + m[0].length; }
+  if (last < c.text.length) parts.push([c.text.slice(last), '#ffffff']);
+  ctx.save(); ctx.globalAlpha = k;
+  rich(parts, 540, 1470 + (1 - eo(k)) * 10, 62, { weight: 700, stroke: 12 });
+  ctx.restore();
+}
+
+// ============ 128 座网格（芯片 / 大巴共用） ============
+// 16 列 × 8 行 = 128 格；fill(i) 返回该格颜色/透明度
+function seats(x, y, cell, gap, fill) {
+  for (let i = 0; i < 128; i++) {
+    const c = Math.floor(i / 8), r = i % 8;
+    const X = x + c * (cell + gap), Y = y + r * (cell + gap) + (r >= 4 ? gap * 2.2 : 0);
+    const f = fill(i, c, r); if (!f) continue;
+    ctx.save(); ctx.globalAlpha *= f.a ?? 1; rr(X, Y, cell, cell, cell * 0.22);
+    if (f.glow) { ctx.shadowColor = f.glow; ctx.shadowBlur = 18; }
+    ctx.fillStyle = f.c; ctx.fill();
+    if (f.edge) { ctx.shadowBlur = 0; ctx.lineWidth = 2.5; ctx.strokeStyle = f.edge; ctx.stroke(); }
+    if (f.label) { ctx.shadowBlur = 0; ctx.fillStyle = f.lc || '#061018'; ctx.font = `700 ${cell * .5}px ${CN}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(f.label, X + cell / 2, Y + cell / 2 + 1); }
+    ctx.restore();
+  }
+}
+const seatsW = (cell, gap) => 16 * (cell + gap) - gap, seatsH = (cell, gap) => 8 * (cell + gap) - gap + gap * 2.2;
+
+// ============ 场景 ============
+const scenes = {};
+
+scenes.hook = (t) => {
+  const tN2 = at('N2', 'DeepSeek');
+  // —— N1：芯片 128 通道，大部分空转 ——
+  const out = P(t, tN2 - 0.1, 0.45);
+  if (out < 1) {
+    ctx.save(); ctx.globalAlpha *= 1 - out; scaleAt(540, 900, lerp(1, 0.9, eo(out)));
+    const cx = 90, cy = 540, cw = 900, ch = 600;
+    // 芯片外壳 + 引脚
+    ctx.save(); ctx.fillStyle = '#3a4560';
+    for (let i = 0; i < 14; i++) { const px = cx + 70 + i * 56; ctx.fillRect(px, cy - 22, 18, 22); ctx.fillRect(px, cy + ch, 18, 22); }
+    for (let i = 0; i < 9; i++) { const py = cy + 60 + i * 56; ctx.fillRect(cx - 22, py, 22, 18); ctx.fillRect(cx + cw, py, 22, 18); }
+    ctx.restore();
+    panel(cx, cy, cw, ch, { fill: '#121a2b', stroke: 'rgba(62,230,255,.45)', lw: 3, r: 34 });
+    txt('GPU 矩阵计算单元', cx + 40, cy + 56, { size: 34, align: 'left', color: C.mute });
+    txt('128 条通道', cx + cw - 40, cy + 56, { size: 34, align: 'right', color: C.cyan, font: CN, weight: 700 });
+    const tIdle = at('N1', '有一步计算'), cell = 46, gap = 7, gx = 540 - seatsW(cell, gap) / 2, gy = cy + 100;
+    seats(gx, gy, cell, gap, (i, c, r) => {
+      const on = 1;
+      const busy = i < 16;
+      const idle = busy ? 0 : P(t, tIdle + (c - 2) * 0.03, 0.3);
+      const pulse = busy ? 0.75 + 0.25 * Math.sin(t * 9 + r) : 1;
+      if (idle > 0) return { c: C.dim, a: on, edge: `rgba(255,90,95,${0.25 + 0.5 * idle})` };
+      return { c: C.cyan, a: on * pulse, glow: C.cyan };
+    });
+    // 87.5% 大数字
+    const tPct = at('N1', '八成以上'), kp = P(t, tPct, 0.6);
+    if (kp > 0) {
+      pop(P(t, tPct, 0.35), s => {
+        scaleAt(540, 1262, s);
+        txt(`${counter(87.5 * eo(kp))}%`, 540, 1262, { size: 170, weight: 800, font: NUM, color: C.red, glow: 'rgba(255,90,95,.6)' });
+      });
+      txt('通道在空转', 540, 1365, { size: 44, color: C.text, alpha: P(t, tPct + .3, .3) });
+    }
+    const kb = P(t, tIdle + 0.4, 0.3);
+    if (kb > 0) chip('只有 16 条在干活', 540, cy + ch - 40, { color: C.cyan, alpha: kb, size: 30 });
+    ctx.restore();
+  }
+  // —— N2：把矩阵倒过来乘 ——
+  const k = P(t, tN2, 0.4);
+  if (k > 0) {
+    const ks = P(t, at('N2', '把矩阵'), 1.1);
+    ctx.save(); ctx.globalAlpha *= k;
+    txt('解法很反直觉', 540, 600, { size: 46, color: C.mute, alpha: k });
+    // A、B 两块沿弧线换位，并加上 T
+    const sw = eio(ks), y0 = 900;
+    const ax = lerp(330, 750, sw), bx = lerp(750, 330, sw), lift = Math.sin(sw * Math.PI) * 170;
+    const blk = (x, y, w, h, col, name) => {
+      ctx.save(); rr(x - w / 2, y - h / 2, w, h, 26); ctx.fillStyle = col + '33'; ctx.fill(); ctx.lineWidth = 4; ctx.strokeStyle = col; ctx.stroke();
+      rich([[name, col, NUM, 120], ...(sw > 0.6 ? [['T', col, NUM, 60, -42]] : [])], x, y + 4, 120, { weight: 800, alpha: 1 });
+      ctx.restore();
+    };
+    blk(ax, y0 - lift, 230, 150, C.cyan, 'A');
+    blk(bx, y0 + lift, 260, 260, C.amber, 'B');
+    txt('×', 540, y0, { size: 90, font: NUM, color: C.mute });
+    if (ks > 0.15 && ks < 0.95) {
+      ctx.save(); ctx.globalAlpha *= Math.sin((ks - 0.15) / 0.8 * Math.PI) * 0.8; ctx.strokeStyle = C.text; ctx.lineWidth = 4; ctx.setLineDash([10, 14]);
+      ctx.beginPath(); ctx.arc(540, y0, 240, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke();
+      ctx.beginPath(); ctx.arc(540, y0, 240, Math.PI * 0.15, Math.PI * 0.85); ctx.stroke(); ctx.restore();
+    }
+    const kt = P(t, at('N2', '倒过来乘'), 0.4);
+    pop(kt, s => { scaleAt(540, 1210, s); txt('把矩阵倒过来乘', 540, 1210, { size: 92, weight: 800, color: C.amber, glow: 'rgba(255,176,32,.55)' }); });
+    ctx.restore();
+  }
+};
+
+scenes.gemm = (t) => {
+  const tag = P(t, at('N3', 'GEMM'), 0.35);
+  txt('大模型每吐一个字', 540, 560, { size: 44, color: C.mute, alpha: P(t, S0('N3'), .4) });
+  pop(tag, s => { scaleAt(540, 650, s); chip('GEMM · 通用矩阵乘法', 540, 650, { size: 40, color: C.cyan }); });
+  // A(16 行) × B(权重) = C
+  const y = 980;
+  const kA = P(t, at('N3', '数据矩阵'), .45), kB = P(t, at('N3', '权重矩阵'), .45), kC = P(t, at('N3', '结果'), .45);
+  const ghost = P(t, at('N3', '矩阵乘法'), .5);
+  const box = (k, x, w, h, col, name, sub, rows) => {
+    if (k <= 0 && ghost > 0) { ctx.save(); ctx.globalAlpha *= ghost * 0.3; rr(x - w / 2, y - h / 2, w, h, 18); ctx.setLineDash([10, 10]); ctx.lineWidth = 3; ctx.strokeStyle = col; ctx.stroke(); txt(name, x, y, { size: 90, font: NUM, weight: 800, color: col }); ctx.restore(); return; }
+    pop(k, s => {
+      scaleAt(x, y, s);
+      ctx.save(); rr(x - w / 2, y - h / 2, w, h, 18); ctx.fillStyle = col + '26'; ctx.fill(); ctx.lineWidth = 4; ctx.strokeStyle = col; ctx.stroke();
+      ctx.globalAlpha *= 0.35; ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+      for (let i = 1; i < rows; i++) { const yy = y - h / 2 + h * i / rows; ctx.beginPath(); ctx.moveTo(x - w / 2 + 8, yy); ctx.lineTo(x + w / 2 - 8, yy); ctx.stroke(); }
+      ctx.restore();
+      txt(name, x, y, { size: 90, font: NUM, weight: 800, color: col });
+      txt(sub, x, y + h / 2 + 50, { size: 34, color: C.text });
+    });
+  };
+  box(kA, 175, 230, 110, C.cyan, 'A', '输入数据', 4);
+  if (ghost > 0) txt('×', 335, y, { size: 70, font: NUM, color: C.mute, alpha: Math.max(ghost * .3, kB) }), txt('=', 700, y, { size: 70, font: NUM, color: C.mute, alpha: Math.max(ghost * .3, kC) });
+  if (0) pop(Math.min(kA, kB), () => txt('×', 335, y, { size: 70, font: NUM, color: C.mute }));
+  box(kB, 520, 260, 330, C.amber, 'B', '模型权重', 12);
+  if (0) pop(Math.min(kB, kC), () => txt('=', 700, y, { size: 70, font: NUM, color: C.mute }));
+  box(kC, 880, 250, 110, C.violet, 'C', '结果', 4);
+  // 扫描线：结果逐格算出
+  if (kC > 0.5) {
+    const sc = (t - at('N3', '结果')) * 0.9 % 1;
+    ctx.save(); ctx.globalAlpha *= 0.6; ctx.fillStyle = C.violet; ctx.fillRect(880 - 125 + 250 * sc - 4, y - 55, 8, 110); ctx.restore();
+  }
+  txt('每一次前向计算，都是海量的 A × B', 540, 1290, { size: 38, color: C.mute, alpha: P(t, at('N3', '结果') + .8, .5) });
+};
+
+scenes.bus = (t) => {
+  const tIn = at('N4', 'Blackwell'), kIn = eo(P(t, tIn - 0.2, 0.7));
+  const cell = 44, gap = 7, bw = seatsW(cell, gap), bh = seatsH(cell, gap);
+  const bx = lerp(-1000, 0, kIn), x0 = 540 - bw / 2 + bx - 30, y0 = 700;
+  txt('Blackwell 矩阵单元 ≈ 一辆固定 128 座的大巴', 540, 560, { size: 38, color: C.text, alpha: P(t, tIn, .4) });
+  // 大巴车身（俯视）
+  ctx.save();
+  panel(x0 - 40, y0 - 50, bw + 150, bh + 100, { fill: '#18243a', stroke: 'rgba(255,176,32,.6)', lw: 4, r: 46 });
+  rr(x0 + bw + 22, y0 - 20, 70, bh + 40, 22); ctx.fillStyle = 'rgba(62,230,255,.22)'; ctx.fill();   // 挡风玻璃
+  ctx.fillStyle = '#05070d';
+  for (const wx of [x0 + 40, x0 + bw - 90]) { rr(wx, y0 - 72, 110, 26, 10); ctx.fill(); rr(wx, y0 + bh + 46, 110, 26, 10); ctx.fill(); }
+  ctx.restore();
+  const tTok = at('N6', '坐进'), tWaste = at('N6', '112'), kTok = P(t, tTok, 0.8);
+  seats(x0, y0, cell, gap, (i, c, r) => {
+    const on = P(t, tIn + 0.4 + i * 0.004, 0.2);
+    if (i < 16 && kTok > 0) {
+      const k = P(t, tTok + i * 0.035, 0.35);
+      if (k > 0) return { c: C.cyan, a: on, glow: C.cyan, label: '字' };
+    }
+    const w = P(t, tWaste + (c - 2) * 0.025, 0.3);
+    if (w > 0) return { c: 'rgba(255,90,95,.18)', a: on, edge: C.red };
+    return { c: '#2c3a55', a: on, edge: 'rgba(160,190,240,.25)' };
+  });
+  // 128 座 标签
+  const k128 = P(t, at('N4', '128'), .35) * (1 - P(t, at('N5', '16') - .5, .3));
+  pop(k128, s => { scaleAt(540, 1265, s); rich([['128', C.amber, NUM, 96], [' 座 · 不管几个人都满载发车', C.text, CN, 40]], 540, 1270, 40, { weight: 800 }); });
+  // N5：16 个 token 排队
+  const tQ = at('N5', '16'), kQ = P(t, tQ - .1, .4);
+  if (kQ > 0 && kTok < 1) {
+    for (let i = 0; i < 16; i++) {
+      const k = P(t, tQ + i * 0.04, 0.3); if (k <= 0) continue;
+      const qx = 540 - 8 * 52 + i * 52 + 4, qy = 1250;
+      const fly = P(t, tTok + i * 0.035, 0.35);
+      const c = Math.floor(i / 8), r = i % 8;
+      const tx = x0 + c * (cell + gap), ty = y0 + r * (cell + gap) + (r >= 4 ? gap * 2.2 : 0);
+      const X = lerp(qx, tx, eio(fly)), Y = lerp(qy, ty, eio(fly)) - Math.sin(fly * Math.PI) * 120;
+      ctx.save(); ctx.globalAlpha *= clamp(k * 2) * (fly >= 1 ? 0 : 1); rr(X, Y, cell, cell, 10); ctx.fillStyle = C.cyan; ctx.fill();
+      ctx.fillStyle = '#061018'; ctx.font = `700 22px ${CN}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('字', X + cell / 2, Y + cell / 2 + 1); ctx.restore();
+    }
+  }
+  if (kQ > 0) txt('在线聊天：一次只来 16 个 token', 540, 1340, { size: 38, color: C.cyan, alpha: kQ * (1 - P(t, tWaste - .3, .3)) });
+  // 浪费结论
+  const kW = P(t, at('N6', '87.5'), .4);
+  if (kW > 0) {
+    ctx.save(); ctx.globalAlpha *= clamp(kW * 2); panel(150, 1200, 780, 190, { fill: 'rgba(40,10,16,.92)', stroke: C.red, lw: 3 }); ctx.restore();
+    pop(kW, s => { scaleAt(540, 1265, s); rich([['112', C.red, NUM, 92], [' 个空座', C.text, CN, 46]], 540, 1268, 46, { weight: 800 }); });
+    txt('87.5% 的算力白白浪费', 540, 1350, { size: 42, color: C.red, weight: 700, alpha: P(t, at('N6', '87.5') + .25, .3) });
+  } else {
+    const kE = P(t, tWaste, .3);
+    if (kE > 0) rich([['16', C.cyan, NUM, 64], [' 人坐  ', C.text, CN, 40], ['112', C.red, NUM, 64], [' 座空', C.text, CN, 40]], 540, 1270, 40, { weight: 800, alpha: kE });
+  }
+};
+
+scenes.swap = (t) => {
+  // —— N7：公式变换 ——
+  const tF = S0('N7'), kF = P(t, tF, .4);
+  const tT = at('N7', 'C的转置'), kSwap = P(t, at('N7', 'B的转置'), 1.0);
+  const fy = lerp(800, 600, eio(P(t, S0('N8') - 0.2, .6)));
+  const fs = lerp(1, 0.72, eio(P(t, S0('N8') - 0.2, .6)));
+  ctx.save(); ctx.globalAlpha *= kF; scaleAt(540, fy, fs);
+  txt('一条高中就学过的公式', 540, fy - 150, { size: 42, color: C.mute, alpha: 1 - P(t, S0('N8') - .3, .3) });
+  const sw = eio(kSwap), showT = P(t, tT, .3);
+  // C [T] = A · B  →  C T = B T · A T
+  const letter = (s, x, y, col, tk) => {
+    txt(s, x, y, { size: 150, font: NUM, weight: 800, color: col, glow: col + '88', blur: 20 });
+    if (tk > 0) txt('T', x + 62, y - 62, { size: 66, font: NUM, weight: 800, color: col, alpha: tk });
+  };
+  const yA = fy + 10;
+  letter('C', 200, yA, C.violet, showT);
+  txt('=', 360, yA, { size: 120, font: NUM, weight: 700, color: C.mute });
+  const pA = 520, pB = 860, lift = Math.sin(sw * Math.PI) * 130;
+  letter('A', lerp(pA, pB, sw), yA - lift, C.cyan, P(t, at('N7', 'A的转置'), .3));
+  letter('B', lerp(pB, pA, sw), yA + lift, C.amber, P(t, at('N7', 'B的转置'), .3));
+  txt('·', 690, yA, { size: 120, font: NUM, weight: 800, color: C.mute });
+  const kBox = P(t, atE('N7', 'A的转置'), .4);
+  if (kBox > 0) { ctx.save(); ctx.globalAlpha *= kBox * (1 - P(t, S0('N8') - .2, .3)); chip('(A·B)ᵀ = Bᵀ·Aᵀ　转置公式', 540, fy + 170, { size: 34, color: C.amber, fill: 'rgba(255,176,32,.12)' }); ctx.restore(); }
+  ctx.restore();
+
+  // —— N8：两种排法对比（M 方向固定 128，N 方向可伸缩） ——
+  const k8 = P(t, S0('N8') - .1, .5);
+  const tFull = at('N8', '座位一下坐满'), tFlex = at('N8', '16个token'), kFlex = P(t, tFlex, .5);
+  const kFade9 = P(t, S0('N9') - .2, .4);
+  if (k8 > 0) {
+    ctx.save(); ctx.globalAlpha *= k8 * (1 - kFade9);
+    const Hh = 440, top = 790;
+    // 左：常规
+    const lx = 90, lw = 400;
+    txt('常规：A · B', lx + lw / 2, top - 40, { size: 38, color: C.text, weight: 700 });
+    ctx.save(); rr(lx, top, lw, Hh, 14); ctx.fillStyle = 'rgba(255,90,95,.10)'; ctx.fill(); ctx.strokeStyle = C.red; ctx.lineWidth = 3; ctx.stroke(); ctx.restore();
+    ctx.save(); rr(lx, top, lw, Hh * 16 / 128, 10); ctx.fillStyle = C.cyan; ctx.fill(); ctx.restore();
+    // 空转区斜纹
+    ctx.save(); ctx.beginPath(); ctx.rect(lx, top + Hh / 8, lw, Hh * 7 / 8); ctx.clip(); ctx.strokeStyle = 'rgba(255,90,95,.35)'; ctx.lineWidth = 3;
+    for (let d = -Hh; d < lw; d += 26) { ctx.beginPath(); ctx.moveTo(lx + d, top + Hh); ctx.lineTo(lx + d + Hh, top); ctx.stroke(); }
+    ctx.restore();
+    txt('16 个 token', lx + lw / 2, top + Hh / 16, { size: 26, color: '#061018', weight: 700 });
+    txt('112 行空转', lx + lw / 2, top + Hh * 0.56, { size: 40, color: C.red, weight: 800 });
+    txt('利用率 12.5%', lx + lw / 2, top + Hh + 50, { size: 40, color: C.red, weight: 800 });
+    // 右：交换
+    const rx = 610, rw = 380, fillK = eo(P(t, tFull, .7)), nW = lerp(rw, 110, eio(kFlex));
+    txt('交换：Bᵀ · Aᵀ', rx + rw / 2, top - 40, { size: 38, color: C.amber, weight: 700 });
+    ctx.save(); rr(rx, top, rw, Hh, 14); ctx.strokeStyle = 'rgba(160,190,240,.25)'; ctx.setLineDash([10, 10]); ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
+    ctx.save(); rr(rx, top, nW, Hh * fillK, 12); ctx.fillStyle = C.amber; ctx.shadowColor = C.amber; ctx.shadowBlur = 20; ctx.fill(); ctx.restore();
+    ctx.save(); ctx.globalAlpha *= 0.45; ctx.strokeStyle = '#3a2600'; ctx.lineWidth = 1.5;
+    for (let i = 1; i < 16; i++) { const yy = top + Hh * i / 16; if (yy > top + Hh * fillK) break; ctx.beginPath(); ctx.moveTo(rx + 6, yy); ctx.lineTo(rx + nW - 6, yy); ctx.stroke(); }
+    ctx.restore();
+    if (fillK > 0.3) {
+      const wide = 1 - P(t, tFlex - .05, .2);
+      if (wide > 0) txt('权重 128 行坐满', rx + nW / 2, top + Hh / 2, { size: 40, color: '#2a1a00', weight: 800, alpha: fillK * wide });
+      else '权重坐满'.split('').forEach((ch, i) => txt(ch, rx + nW / 2, top + Hh / 2 - 105 + i * 70, { size: 46, color: '#2a1a00', weight: 800, alpha: P(t, tFlex + .3, .3) }));
+    }
+    if (kFlex > 0) {
+      txt('N = 16', rx + nW + 22, top + 60, { size: 40, font: NUM, align: 'left', color: C.cyan, weight: 800, alpha: kFlex });
+      txt('token 放这边', rx + nW + 22, top + 115, { size: 30, align: 'left', color: C.cyan, alpha: kFlex });
+      txt('按需伸缩', rx + nW + 22, top + 160, { size: 30, align: 'left', color: C.cyan, alpha: kFlex });
+      arrow(rx + nW + 30, top + 230, rx + nW + 200, top + 230, C.cyan, 5, eo(P(t, tFlex + .4, .5)));
+    }
+    txt('M 方向固定 128', 540, top + Hh / 2, { size: 26, color: C.mute, alpha: 0 });
+    txt('利用率 100%', rx + rw / 2, top + Hh + 50, { size: 40, color: C.green, weight: 800, alpha: P(t, tFull + .4, .4) });
+    ctx.restore();
+  }
+  // —— N9：转置写回 ——
+  const k9 = P(t, S0('N9') - .1, .4);
+  if (k9 > 0) {
+    ctx.save(); ctx.globalAlpha *= k9;
+    panel(110, 820, 860, 500, { fill: 'rgba(14,20,34,.96)', stroke: C.line });
+    const tI = at('N9', '转置指令'), kRot = eio(P(t, tI, 1.0));
+    // Cᵀ（竖条）旋转成 C（横条）
+    ctx.save(); ctx.translate(330, 1060); ctx.rotate(-Math.PI / 2 * kRot);
+    rr(-55, -150, 110, 300, 14); ctx.fillStyle = C.violet + '55'; ctx.fill(); ctx.strokeStyle = C.violet; ctx.lineWidth = 4; ctx.stroke();
+    ctx.restore();
+    rich([['C', C.violet, NUM, 90], ...(kRot < 0.5 ? [['T', C.violet, NUM, 46, -32]] : [])], 330, 1065, 90, { weight: 800 });
+    txt('寄存器里', 330, 870 + 0, { size: 32, color: C.mute });
+    pop(P(t, tI, .4), s => { scaleAt(560, 975, s); chip('硬件转置指令', 560, 975, { size: 30, color: C.amber, fill: 'rgba(255,176,32,.12)' }); });
+    arrow(470, 1060, 690, 1060, C.amber, 6, eo(P(t, at('N9', '写回'), .5)));
+    const kM = P(t, at('N9', '显存'), .4);
+    pop(kM, s => { scaleAt(820, 1060, s); panel(720, 980, 200, 160, { fill: 'rgba(62,230,255,.12)', stroke: C.cyan, r: 20 }); txt('显存', 820, 1040, { size: 40, color: C.cyan, weight: 700 }); txt('C 正向存好', 820, 1095, { size: 26, color: C.text }); });
+    txt('顺路翻回来，几乎不额外花时间', 540, 1260, { size: 36, color: C.text, alpha: P(t, at('N9', '翻回来'), .4) });
+    ctx.restore();
+  }
+};
+
+scenes.result = (t) => {
+  const k = P(t, S0('N10'), .4);
+  txt('实测 · NVIDIA B300', 540, 560, { size: 40, color: C.text, weight: 700, alpha: k });
+  txt('DeepSeek-V3.2 真实尺寸 · 解码阶段矩阵乘', 540, 616, { size: 30, color: C.mute, alpha: P(t, at('N10', 'DeepSeek'), .4) });
+  const base = 1170, maxH = 430, tBar = at('N10', '最高提速'), kb = eo(P(t, S0('N10') + .6, .9)), kg = eo(P(t, tBar, 1.0));
+  const bar = (x, v, kk, col, name) => {
+    const h = maxH * v / 1.53 * kk;
+    ctx.save(); rr(x - 110, base - h, 220, h, 18); ctx.fillStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 24; ctx.fill(); ctx.restore();
+    txt(`${(v * kk).toFixed(2)}×`, x, base - h - 50, { size: 64, font: NUM, weight: 800, color: col, alpha: kk > 0 ? 1 : 0 });
+    txt(name, x, base + 50, { size: 38, color: C.text, weight: 700 });
+  };
+  ctx.save(); ctx.strokeStyle = C.line; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(150, base); ctx.lineTo(930, base); ctx.stroke(); ctx.restore();
+  bar(340, 1.0, kb, '#4a5a7a', '常规写法');
+  bar(740, 1.53, kg, C.green, '倒过来乘');
+  const kz = P(t, at('N10', '没加一块卡'), .35);
+  pop(kz, s => { scaleAt(540, 1320, s); chip('硬件 +0　纯靠软件', 540, 1320, { size: 40, color: C.amber, fill: 'rgba(255,176,32,.14)' }); });
+  txt('数据来源：原文引用的独立开发者实测', 540, 1395, { size: 24, color: C.mute, alpha: k });
+};
+
+scenes.lib = (t) => {
+  const k = P(t, S0('N11'), .4);
+  txt('这只是 DeepGEMM 的一招', 540, 570, { size: 46, color: C.text, weight: 700, alpha: k });
+  const card = (i, kk, big, unit, sub, col) => {
+    const y = 700 + i * 215;
+    pop(kk, s => {
+      scaleAt(540, y + 90, s);
+      panel(130, y, 820, 180, { stroke: col + 'aa' });
+      ctx.save(); rr(130, y, 14, 180, 7); ctx.fillStyle = col; ctx.fill(); ctx.restore();
+      rich([[big, col, NUM, 84], [unit, C.text, CN, 38]], 380, y + 90, 40, { weight: 800 });
+      txt(sub, 900, y + 90, { size: 32, color: C.mute, align: 'right' });
+    });
+  };
+  card(0, P(t, at('N11', '三百行'), .4), '≈300', ' 行', '核心逻辑', C.cyan);
+  card(1, P(t, at('N11', '即时编译'), .4), 'JIT', ' 编译', '运行时按形状生成', C.violet);
+  card(2, P(t, at('N11', '1550'), .4), '1550', ' TFLOPS', 'H800 · FP8 峰值', C.green);
+  txt('github.com/deepseek-ai/DeepGEMM', 540, 1380, { size: 28, color: C.mute, font: NUM, weight: 600, alpha: k });
+};
+
+scenes.ascend = (t) => {
+  const k = P(t, S0('N12'), .4);
+  pop(k, s => { scaleAt(540, 580, s); chip('2026.09.30  开源', 540, 580, { size: 38, color: C.amber, fill: 'rgba(255,176,32,.14)' }); });
+  txt('DeepGEMM-Ascend 昇腾版', 540, 680, { size: 54, weight: 800, color: C.text, alpha: P(t, at('N12', '昇腾版'), .4) });
+  // 同一套 API 连接两边
+  const kA = P(t, at('N12', '接口'), .45);
+  if (kA > 0) {
+    ctx.save(); ctx.globalAlpha *= kA;
+    panel(110, 770, 300, 120, { stroke: 'rgba(92,255,157,.6)' }); txt('NVIDIA 版', 260, 830, { size: 38, weight: 700 });
+    panel(670, 770, 300, 120, { stroke: 'rgba(255,90,95,.6)' }); txt('昇腾版', 820, 830, { size: 38, weight: 700 });
+    ctx.save(); ctx.strokeStyle = C.cyan; ctx.lineWidth = 5; ctx.setLineDash([14, 10]); ctx.lineDashOffset = -t * 40;
+    ctx.beginPath(); ctx.moveTo(420, 830); ctx.lineTo(660, 830); ctx.stroke(); ctx.restore();
+    txt('同一套 API', 540, 800, { size: 30, color: C.cyan, weight: 700 });
+    ctx.restore();
+  }
+  // 99.8% 圆环
+  const tP = at('N12', '99.8'), kr = eo(P(t, tP - .4, 1.2));
+  if (P(t, at('N12', '团队自测'), .3) > 0) {
+    const cx = 540, cy = 1150, R = 200;
+    ctx.save(); ctx.globalAlpha *= P(t, at('N12', '团队自测'), .3);
+    ctx.lineWidth = 34; ctx.strokeStyle = C.dim; ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = C.green; ctx.lineCap = 'round'; ctx.shadowColor = C.green; ctx.shadowBlur = 24;
+    ctx.beginPath(); ctx.arc(cx, cy, R, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * 0.998 * kr); ctx.stroke();
+    ctx.restore();
+    txt(`${(99.8 * kr).toFixed(1)}%`, cx, cy - 14, { size: 82, font: NUM, weight: 800, color: C.green });
+    txt('硬件极限', cx, cy + 58, { size: 34, color: C.text, alpha: kr });
+    txt('团队自测 · 密集矩阵乘', 540, 1402, { size: 28, color: C.mute });
+  }
+};
+
+scenes.outro = (t) => {
+  const k = P(t, S0('N13'), .5);
+  ctx.save(); ctx.globalAlpha *= k;
+  rich([['C', C.violet, NUM, 130], ['T', C.violet, NUM, 58, -52], [' = ', C.mute, NUM, 110], ['B', C.amber, NUM, 130], ['T', C.amber, NUM, 58, -52], [' · ', C.mute, NUM, 110], ['A', C.cyan, NUM, 130], ['T', C.cyan, NUM, 58, -52]], 540, 700, 130, { weight: 800, glow: 'rgba(255,176,32,.25)' });
+  ctx.restore();
+  const k2 = P(t, at('N13', '不只看'), .5), k3 = P(t, at('N13', '几百行代码'), .5);
+  txt('不只看堆了多少卡', 540, 920, { size: 54, color: C.mute, weight: 700, alpha: k2 });
+  pop(k3, s => { scaleAt(540, 1040, s); txt('也看底层代码有多懂硬件', 540, 1040, { size: 62, color: C.amber, weight: 800, glow: 'rgba(255,176,32,.4)' }); });
+  const k4 = P(t, S1('N13') + 0.3, .6);
+  txt('你看不见地基，但地基决定了一切', 540, 1220, { size: 42, color: C.text, weight: 700, alpha: k4 });
+  txt('资料：新智物种 · DeepSeek GitHub', 540, 1320, { size: 26, color: C.mute, alpha: k4 });
+};
+
+// ============ 音效事件（导出给混音） ============
+function sfxEvents() {
+  const E = [];
+  SCENES.forEach((s, i) => { if (i) E.push({ t: s.a, n: 'whoosh' }); });
+  E.push({ t: at('N1', '有一步计算'), n: 'down' }, { t: at('N1', '八成以上'), n: 'hit' },
+    { t: at('N2', '把矩阵'), n: 'swish' }, { t: at('N2', '倒过来乘'), n: 'hit' },
+    { t: at('N3', 'GEMM'), n: 'pop' }, { t: at('N3', '数据矩阵'), n: 'pop' }, { t: at('N3', '权重矩阵'), n: 'pop' }, { t: at('N3', '结果'), n: 'pop' },
+    { t: at('N4', '128'), n: 'pop' }, { t: at('N5', '16'), n: 'tick' }, { t: at('N6', '坐进'), n: 'tick' }, { t: at('N6', '87.5'), n: 'down' },
+    { t: at('N7', 'B的转置'), n: 'swish' }, { t: at('N8', '座位一下坐满'), n: 'rise' }, { t: at('N8', '16个token'), n: 'pop' },
+    { t: at('N9', '转置指令'), n: 'swish' }, { t: at('N10', '最高提速'), n: 'rise' }, { t: at('N10', '没加一块卡'), n: 'hit' },
+    { t: at('N11', '三百行'), n: 'pop' }, { t: at('N11', '即时编译'), n: 'pop' }, { t: at('N11', '1550'), n: 'pop' },
+    { t: S0('N12'), n: 'pop' }, { t: at('N12', '99.8') - .4, n: 'rise' }, { t: at('N13', '几百行代码'), n: 'hit' });
+  return E.sort((a, b) => a.t - b.t);
+}
+window.sfxEvents = sfxEvents;
+
+// ============ 合成 ============
+function frameAt(t) {
+  background(t);
+  for (const s of SCENES) {
+    const fadeIn = s.a === 0 ? 1 : P(t, s.a, 0.35), fadeOut = 1 - P(t, s.b, 0.3);
+    if (t < s.a || t > s.b + 0.3) continue;
+    ctx.save(); ctx.globalAlpha = fadeIn * fadeOut; ctx.translate(0, (1 - eo(fadeIn)) * 40);
+    scenes[s.name](t); ctx.restore();
+  }
+  headline(t);
+  subtitles(t);
+}
+
+// 封面（视频号/抖音竖封面）
+function cover() {
+  background(3);
+  txt('DeepSeek · DeepGEMM', 540, 290, { size: 40, color: C.mute, weight: 600 });
+  rich([['顶级显卡', C.text]], 540, 430, 120, { weight: 800 });
+  txt('87.5%', 540, 645, { size: 220, font: NUM, weight: 800, color: C.red, glow: 'rgba(255,90,95,.6)', blur: 40 });
+  txt('在空转？', 540, 850, { size: 120, weight: 800, color: C.text });
+  const cell = 40, gap = 7; seats(540 - seatsW(cell, gap) / 2, 980, cell, gap, (i) => i < 16 ? { c: C.cyan, glow: C.cyan } : { c: C.dim, edge: 'rgba(255,90,95,.6)' });
+  txt('把矩阵倒过来乘', 540, 1480, { size: 104, weight: 800, color: C.amber, glow: 'rgba(255,176,32,.5)' });
+  rich([['C', C.violet, NUM, 92], ['T', C.violet, NUM, 42, -36], [' = ', C.mute, NUM, 80], ['B', C.amber, NUM, 92], ['T', C.amber, NUM, 42, -36], [' · ', C.mute, NUM, 80], ['A', C.cyan, NUM, 92], ['T', C.cyan, NUM, 42, -36]], 540, 1640, 92, { weight: 800 });
+}
+
+window.renderFrame = (i) => frameAt(i / FPS);
+window.renderCover = cover;
+window.TOTAL_FRAMES = Math.round(TL.total * FPS);
+
+// 预览播放器
+const q = new URLSearchParams(location.search);
+(async () => {
+  await Promise.all([`800 40px ${CN}`, `700 40px ${CN}`, `600 40px ${CN}`, `800 40px ${NUM}`].map(f => document.fonts.load(f, '顶级显卡0123')));
+  if (q.get('mode') === 'render') { document.getElementById('bar').remove(); window.__ready = true; return; }
+  const audio = new Audio(q.get('audio') || 'audio/vo.wav'); let playing = false;
+  const seek = document.getElementById('seek'), clock = document.getElementById('clock');
+  document.getElementById('play').onclick = () => { playing = !playing; playing ? audio.play() : audio.pause(); };
+  seek.oninput = () => { audio.currentTime = seek.value / 1000 * TL.total; };
+  (function loop() { const t = audio.currentTime; frameAt(t); clock.textContent = t.toFixed(2); if (!seek.matches(':active')) seek.value = t / TL.total * 1000; requestAnimationFrame(loop); })();
+  window.__ready = true;
+})();
+</script>
+</body>
+</html>

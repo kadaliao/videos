@@ -1,0 +1,187 @@
+{
+  "title": "把矩阵倒过来乘",
+  "source": "新智物种《英伟达顶级芯片被曝闲置87%算力！DeepSeek把矩阵倒过来乘，直接封神》https://mp.weixin.qq.com/s/JEbRPGyTj0OAf81QCVF1OA",
+  "voice": "Charon",
+  "styles": {
+    "hook": "energetic, confident and punchy tech explainer speaking natural Mandarin Chinese, intriguing, slightly fast pace",
+    "body": "friendly, clear and confident tech explainer speaking natural Mandarin Chinese, conversational, lively medium pace, warm"
+  },
+  "segments": [
+    {
+      "id": "N1",
+      "scene": "hook",
+      "style": "hook",
+      "gap": 0,
+      "text": "几万美金一块的顶级显卡，在大模型一个字一个字往外蹦的时候，有一步计算，八成以上的通道都在空转。",
+      "subs": [
+        "几万美金一块的顶级显卡",
+        "在大模型一个字一个字",
+        "往外蹦的时候",
+        "有一步计算",
+        "八成以上的通道都在空转"
+      ]
+    },
+    {
+      "id": "N2",
+      "scene": "hook",
+      "style": "hook",
+      "gap": 0.15,
+      "text": "DeepSeek 的解法特别反直觉：把矩阵倒过来乘。",
+      "subs": [
+        "DeepSeek 的解法特别反直觉",
+        "把矩阵倒过来乘"
+      ]
+    },
+    {
+      "id": "N3",
+      "scene": "gemm",
+      "style": "body",
+      "gap": 0.35,
+      "text": "大模型每吐一个字，底层都在做大量矩阵乘法，也就是 GEMM。输入的数据矩阵 A，乘上模型的权重矩阵 B，得到结果 C。",
+      "subs": [
+        "大模型每吐一个字",
+        "底层都在做大量矩阵乘法",
+        "也就是 GEMM",
+        "输入的数据矩阵 A",
+        "乘上模型的权重矩阵 B",
+        "得到结果 C"
+      ]
+    },
+    {
+      "id": "N4",
+      "scene": "bus",
+      "style": "body",
+      "gap": 0.3,
+      "text": "问题出在英伟达 Blackwell 芯片的矩阵单元上。它像一辆固定 128 座的大巴，不管上来几个人，都按 128 座发车。",
+      "subs": [
+        "问题出在英伟达",
+        "Blackwell 芯片的矩阵单元上",
+        "它像一辆固定 128 座的大巴",
+        "不管上来几个人",
+        "都按 128 座发车"
+      ]
+    },
+    {
+      "id": "N5",
+      "scene": "bus",
+      "style": "body",
+      "gap": 0.2,
+      "text": "而在线聊天时，为了回得快，一次往往只处理 16 个 token。",
+      "subs": [
+        "而在线聊天时 为了回得快",
+        "一次往往只处理 16 个 token"
+      ]
+    },
+    {
+      "id": "N6",
+      "scene": "bus",
+      "style": "body",
+      "gap": 0.15,
+      "text": "按常规写法，这 16 个 token 坐进 128 个座位，112 个座位空着，87.5% 的算力白白浪费。",
+      "subs": [
+        "按常规写法",
+        "这 16 个 token",
+        "坐进 128 个座位",
+        "112 个座位空着",
+        "87.5% 的算力白白浪费"
+      ]
+    },
+    {
+      "id": "N7",
+      "scene": "swap",
+      "style": "body",
+      "gap": 0.35,
+      "text": "DeepSeek 用的，是一条高中就学过的公式：C 的转置，等于 B 的转置，乘 A 的转置。",
+      "subs": [
+        "DeepSeek 用的",
+        "是一条高中就学过的公式",
+        "C 的转置 等于 B 的转置",
+        "乘 A 的转置"
+      ]
+    },
+    {
+      "id": "N8",
+      "scene": "swap",
+      "style": "body",
+      "gap": 0.2,
+      "text": "这样一换，几千行的权重矩阵去坐那辆 128 座大巴，座位一下坐满；16 个 token 换到另一个能按需伸缩的方向，要几个座就开几个。",
+      "subs": [
+        "这样一换",
+        "几千行的权重矩阵",
+        "去坐那辆 128 座大巴",
+        "座位一下坐满",
+        "16 个 token 换到",
+        "另一个能按需伸缩的方向",
+        "要几个座就开几个"
+      ]
+    },
+    {
+      "id": "N9",
+      "scene": "swap",
+      "style": "body",
+      "gap": 0.2,
+      "text": "算完再用芯片自带的转置指令，在写回显存的路上把结果翻回来。",
+      "subs": [
+        "算完再用芯片自带的转置指令",
+        "在写回显存的路上",
+        "把结果翻回来"
+      ]
+    },
+    {
+      "id": "N10",
+      "scene": "result",
+      "style": "body",
+      "gap": 0.35,
+      "text": "文章引用的实测显示：在 B300 上，按 DeepSeek V3.2 的真实尺寸，解码阶段的矩阵乘最高提速 1.53 倍。没加一块卡，全靠吃透硬件。",
+      "subs": [
+        "文章引用的实测显示",
+        "在 B300 上",
+        "按 DeepSeek V3.2 的真实尺寸",
+        "解码阶段的矩阵乘",
+        "最高提速 1.53 倍",
+        "没加一块卡 全靠吃透硬件"
+      ]
+    },
+    {
+      "id": "N11",
+      "scene": "lib",
+      "style": "body",
+      "gap": 0.35,
+      "text": "这只是 DeepGEMM 的一招。这个开源库核心逻辑约三百行，运行时即时编译，在 H800 上最高跑到 1550 TFLOPS。",
+      "subs": [
+        "这只是 DeepGEMM 的一招",
+        "这个开源库核心逻辑约三百行",
+        "运行时即时编译",
+        "在 H800 上",
+        "最高跑到 1550 TFLOPS"
+      ]
+    },
+    {
+      "id": "N12",
+      "scene": "ascend",
+      "style": "body",
+      "gap": 0.3,
+      "text": "9 月 30 号，DeepSeek 又开源了昇腾版，接口和英伟达版完全一致。团队自测，矩阵乘跑到了硬件极限的 99.8%。",
+      "subs": [
+        "9 月 30 号",
+        "DeepSeek 又开源了昇腾版",
+        "接口和英伟达版完全一致",
+        "团队自测",
+        "矩阵乘跑到了硬件极限的 99.8%"
+      ]
+    },
+    {
+      "id": "N13",
+      "scene": "outro",
+      "style": "body",
+      "gap": 0.35,
+      "text": "大模型贵不贵，不只看堆了多少卡，也看底层这几百行代码，有多懂硬件。",
+      "subs": [
+        "大模型贵不贵",
+        "不只看堆了多少卡",
+        "也看底层这几百行代码",
+        "有多懂硬件"
+      ]
+    }
+  ]
+}
