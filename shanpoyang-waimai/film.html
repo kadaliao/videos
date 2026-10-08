@@ -238,7 +238,7 @@ function textItem(it, s, t) {
   const tl = (t - s.t0) / SEC;                              // 镜内第几小节
   const chars = [...it.col], upto = it.upto ?? chars.length, carry = it.carry ?? 0, gap = (it.gap ?? .09) * 4; // gap 单位：拍
   const untilK = it.until != null ? 1 - (tl - it.until) / .35 : 1 - (t - (s.t1 - .25)) / .25;
-  const fadeShot = (s.next && s.next.carries) ? 1 : untilK;
+  const fadeShot = it.until != null ? untilK : (s.next && s.next.carries) ? 1 : untilK;
   const color = it.dark ? PAPER : INK, haloColor = it.dark ? [20, 19, 18] : PAPER;
   const segs = (it.seg || []).slice().sort((a, b) => a[1] - b[1]);
   column(it.col, it.x, it.y, it.size || 96, color, i => {

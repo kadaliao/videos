@@ -8,4 +8,4 @@
 | [`insurance-101/`](insurance-101/) | 保险，到底在保什么 · 给普通人的保险第一课 | 6:12 | 横屏 16:9，1080p 60fps，配音 + 配乐，字幕已烧录 |
 | [`deepgemm-swapab/`](deepgemm-swapab/) | 顶级显卡 87.5% 在空转？DeepSeek 把矩阵倒过来乘 | 1:54 | 竖屏 9:16，1080p 30fps，配音 + 配乐，字幕已烧录 |
 | [`nobel-2026-optogenetics/`](nobel-2026-optogenetics/) | 一束光，打开大脑的开关 · 2026 诺贝尔生理学或医学奖 | 3:51 | 竖屏 9:16，1080p 30fps，配音 + 配乐，字幕已烧录 |
-| [`shanpoyang-waimai/`](shanpoyang-waimai/) | 山坡羊 · 外卖骑手 · 水墨短片 | 2:08 | 竖屏 9:16，1080p 30fps，配乐，诗句已烧录 |
+| [`shanpoyang-waimai/`](shanpoyang-waimai/) | 山坡羊 · 外卖骑手 · 水墨动态短片 | 0:58 | 竖屏 9:16，1080p 30fps，配乐，诗句已烧录 |
