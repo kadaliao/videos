@@ -10,7 +10,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| [`shanpoyang-waimai_1080p30.mp4`](shanpoyang-waimai_1080p30.mp4) | 1080×1920 · 30fps，-16 LUFS，诗句已烧录 |
+| [`shanpoyang-waimai_1080p30.mp4`](shanpoyang-waimai_1080p30.mp4) | 1080×1920 · 30fps，56 MB，-16 LUFS，诗句已烧录 |
 | [`cover.png`](cover.png) | 竖版封面 |
 
 ## 分镜
