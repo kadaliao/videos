@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>山坡羊·外卖骑手（第二版）</title>
+<style>
+  @font-face { font-family: "WenKai"; src: url("fonts/WenKai-sub.ttf"); }
+  @font-face { font-family: "WenKaiM"; src: url("fonts/WenKaiM-sub.ttf"); }
+  @font-face { font-family: "MaShan"; src: url("fonts/MaShan-sub.ttf"); }
+  html, body { margin: 0; background: #111; }
+  canvas { display: block; width: min(100vw, calc(100vh * 9 / 16)); height: auto; margin: 0 auto; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 8px; padding: 8px; background: #0008; color: #ccd; font: 13px/1.4 sans-serif; }
+  #bar input { flex: 1; }
+  body.render #bar { display: none; }
+</style>
+</head>
+<body>
+<canvas id="stage" width="1080" height="1920"></canvas>
+<div id="bar"><button id="play">播放</button><input id="seek" type="range" min="0" max="1000" value="0"><span id="clock">0.00</span></div>
+<script>
+// ============================================================ 基础
+// 画面只由时间 t 决定。时间轴（小节）与配乐共用 timeline.json：72 BPM，一小节 10/3 秒。
+const W = 1080, H = 1920;
+const cv = document.getElementById('stage'), ctx = cv.getContext('2d');
+const INK = [29, 27, 25], PAPER = [246, 241, 232], CINNABAR = '#b5322b';
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const ease = k => (k = clamp(k), k * k * (3 - 2 * k));
+const easeOut = k => 1 - Math.pow(1 - clamp(k), 3);
+const easeInOut = k => (k = clamp(k), k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+const rgb = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const mix3 = (a, b, k) => [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+function rand(seed) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); }
+
+let TL, FPS, BAR, STOP, RESUME, TOTAL, TOTAL_FRAMES;
+const B = (bar, beat = 0) => bar * BAR + beat * BAR / 4;
+// “停”的两小节里画面时间冻结：雨停在半空，镜头不动
+const frozen = t => t < STOP ? t : t < RESUME ? STOP : t - (RESUME - STOP);
+
+// ============================================================ 资源
+const IMG = {};
+const NAMES = ['A_day', 'B_night', 'C_dawn', 'D_rain', 'E_snow', 'F_market', 'G_tower', 'H_bbq', 'I_moon', 'J_rest', 'K_road', 'P_paper'];
+function loadImg(src) { return new Promise((ok, no) => { const im = new Image(); im.onload = () => ok(im); im.onerror = no; im.src = src; }); }
+
+// 低频噪声（墨晕开的边缘）
+const NW = 270, NH = 480; let NOISE;
+function makeNoise() {
+  const r = rand(7), g = (w, h) => Array.from({ length: (w + 1) * (h + 1) }, r);
+  const out = new Float32Array(NW * NH);
+  let amp = 1, tot = 0;
+  for (const cell of [96, 48, 24, 12, 6]) {
+    const gw = Math.ceil(NW / cell), gh = Math.ceil(NH / cell), grid = g(gw, gh);
+    for (let y = 0; y < NH; y++) for (let x = 0; x < NW; x++) {
+      const fx = x / cell, fy = y / cell, ix = fx | 0, iy = fy | 0, u = ease(fx - ix), v = ease(fy - iy);
+      const a = grid[iy * (gw + 1) + ix], b = grid[iy * (gw + 1) + ix + 1], c = grid[(iy + 1) * (gw + 1) + ix], d = grid[(iy + 1) * (gw + 1) + ix + 1];
+      out[y * NW + x] += amp * lerp(lerp(a, b, u), lerp(c, d, u), v);
+    }
+    tot += amp; amp *= .55;
+  }
+  for (let i = 0; i < out.length; i++) out[i] /= tot;
+  let mn = 1, mx = 0; for (const v of out) { mn = Math.min(mn, v); mx = Math.max(mx, v); }
+  for (let i = 0; i < out.length; i++) out[i] = (out[i] - mn) / (mx - mn);
+  NOISE = out;
+}
+const maskCv = document.createElement('canvas'); maskCv.width = NW; maskCv.height = NH; const mctx = maskCv.getContext('2d');
+const maskImg = mctx.createImageData(NW, NH);
+const tmp = document.createElement('canvas'); tmp.width = W; tmp.height = H; const tctx = tmp.getContext('2d');
+// 墨晕遮罩：p 从 0 到 1，噪声低的地方先显出来；dir 给一个方向偏置（墨从哪里洇开）
+function inkMask(p, dir = { x: .5, y: .5, k: .6 }) {
+  const d = maskImg.data;
+  for (let y = 0; y < NH; y++) for (let x = 0; x < NW; x++) {
+    const i = y * NW + x, dx = x / NW - dir.x, dy = (y / NH - dir.y) * 1.78;
+    const v = NOISE[i] * (1 - dir.k) + Math.min(1, Math.hypot(dx, dy) / 1.1) * dir.k;
+    d[i * 4 + 3] = 255 * clamp((p * 1.35 - v) * 7);
+  }
+  mctx.putImageData(maskImg, 0, 0);
+  return maskCv;
+}
+
+// ============================================================ 画面层
+// cam: {x, y, z}：图像上的归一化焦点 + 相对“铺满”的缩放
+function drawScene(name, cam, alpha = 1, opts = {}) {
+  const im = IMG[name]; if (!im || alpha <= 0) return;
+  const base = Math.max(W / im.width, H / im.height), s = base * cam.z;
+  const dw = im.width * s, dh = im.height * s;
+  let x = W / 2 - cam.x * dw, y = H / 2 - cam.y * dh;
+  x = clamp(x, W - dw, 0); y = clamp(y, H - dh, 0);
+  const c = opts.mask ? tctx : ctx;
+  if (opts.mask) { tctx.globalCompositeOperation = 'source-over'; tctx.clearRect(0, 0, W, H); }
+  c.save(); c.globalAlpha = opts.mask ? 1 : alpha;
+  if (opts.filter) c.filter = opts.filter;
+  c.drawImage(im, x, y, dw, dh); c.restore();
+  if (opts.gray > 0) { c.save(); c.globalAlpha = (opts.mask ? 1 : alpha) * opts.gray; c.filter = 'grayscale(1) brightness(0.97)'; c.drawImage(im, x, y, dw, dh); c.restore(); }
+  if (opts.mask) {
+    tctx.save(); tctx.globalCompositeOperation = 'destination-in'; tctx.imageSmoothingQuality = 'high';
+    tctx.drawImage(opts.mask, 0, 0, W, H); tctx.restore();
+    ctx.save(); ctx.globalAlpha = alpha; ctx.drawImage(tmp, 0, 0); ctx.restore();
+  }
+}
+const camLerp = (a, b, k) => ({ x: lerp(a.x, b.x, k), y: lerp(a.y, b.y, k), z: lerp(a.z, b.z, k) });
+
+// 雨：斜向的细笔，正片叠底；时间用冻结后的时钟
+const RAIN = (() => { const r = rand(11); return Array.from({ length: 340 }, () => ({ x: r() * 1.3 - .15, y: r(), len: 50 + r() * 120, sp: 1500 + r() * 1100, w: .8 + r() * 1.8, a: .10 + r() * .22 })); })();
+function drawRain(t, k, slant = .2) {
+  if (k <= 0) return;
+  ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.lineCap = 'round';
+  for (const d of RAIN) {
+    const y = ((d.y * (H + 300) + d.sp * t) % (H + 300)) - 150, x = d.x * W + slant * y;
+    ctx.strokeStyle = rgb([70, 68, 66], d.a * k); ctx.lineWidth = d.w;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + slant * d.len, y + d.len); ctx.stroke();
+  }
+  ctx.restore();
+}
+// 雪：纸色的点，大小不一，左右摆动
+const SNOW = (() => { const r = rand(23); return Array.from({ length: 420 }, () => ({ x: r(), y: r(), s: 1.2 + Math.pow(r(), 3) * 7, sp: 40 + r() * 110, ph: r() * 6.28, sw: 10 + r() * 40, a: .5 + r() * .5 })); })();
+function drawSnow(t, k) {
+  if (k <= 0) return;
+  ctx.save();
+  for (const f of SNOW) {
+    const y = ((f.y * (H + 40) + f.sp * t) % (H + 40)) - 20, x = ((f.x * W + Math.sin(t * .8 + f.ph) * f.sw + t * 18) % (W + 20)) - 10;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, f.s);
+    g.addColorStop(0, rgb(PAPER, f.a * k)); g.addColorStop(.55, rgb(PAPER, f.a * k * .6)); g.addColorStop(1, rgb(PAPER, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, f.s, 0, 6.283); ctx.fill();
+  }
+  ctx.restore();
+}
+// 烟：大团柔和的灰，缓缓上升、散开
+const SMOKE = (() => { const r = rand(31); return Array.from({ length: 16 }, () => ({ x: .25 + r() * .6, y: r(), r: 160 + r() * 260, sp: 18 + r() * 26, a: .05 + r() * .06, ph: r() * 6.28 })); })();
+function drawSmoke(t, k) {
+  if (k <= 0) return;
+  ctx.save(); ctx.globalCompositeOperation = 'multiply';
+  for (const s of SMOKE) {
+    const life = ((s.y * 40 + t) % 40) / 40, y = H * (1.05 - life * 1.1), x = s.x * W + Math.sin(t * .2 + s.ph) * 60, r = s.r * (0.7 + life * .8);
+    const a = s.a * k * Math.sin(Math.PI * life);
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, rgb([120, 118, 115], a)); g.addColorStop(1, rgb([120, 118, 115], 0));
+    ctx.fillStyle = g; ctx.fillRect(x - r, y - r, 2 * r, 2 * r);
+  }
+  ctx.restore();
+}
+// 薄雾横移
+function drawMist(t, k, y0 = .6) {
+  if (k <= 0) return;
+  ctx.save();
+  for (let i = 0; i < 6; i++) {
+    const y = H * (y0 + .06 * Math.sin(i * 1.7)), x = ((i * 380 + t * (14 + i * 3)) % (W + 900)) - 450, r = 420 + i * 30;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, rgb(PAPER, .16 * k)); g.addColorStop(1, rgb(PAPER, 0));
+    ctx.save(); ctx.translate(x, y); ctx.scale(1.8, .45); ctx.translate(-x, -y);
+    ctx.fillStyle = g; ctx.fillRect(x - r, y - r, 2 * r, 2 * r); ctx.restore();
+  }
+  ctx.restore();
+}
+// 一滴墨在纸上洇开：真实的墨滴图（Gemini 绘），从中心向外“渗”出来，再慢慢淡去
+function drawInkDrop(t, t0, x, y, size) {
+  const k = (t - t0) / 2.8; if (k <= 0 || k > 2.2) return;
+  const r = size * .5 * (.12 + .88 * easeOut(Math.min(k, 1))), a = .92 * (1 - ease((k - .55) / 1.4));
+  tctx.save(); tctx.globalCompositeOperation = 'source-over'; tctx.clearRect(0, 0, W, H);
+  tctx.drawImage(IMG.drop, x - size / 2, y - size / 2, size, size);
+  const g = tctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(.8, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  tctx.globalCompositeOperation = 'destination-in'; tctx.fillStyle = g; tctx.fillRect(0, 0, W, H); tctx.restore();
+  ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.globalAlpha = a; ctx.drawImage(tmp, 0, 0); ctx.restore();
+}
+function vignette(k = .22) {
+  const g = ctx.createRadialGradient(W / 2, H * .48, H * .3, W / 2, H * .5, H * .78);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, `rgba(20,18,16,${k})`);
+  ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); ctx.restore();
+}
+
+// ============================================================ 文字：竖排，一字一字由洇到清
+const PUNCT = new Set(['，', '；', '。', '、']);
+// chars: 字符串；x: 列中心；y: 首字顶；size；color: [r,g,b]；appear(i)→0..1；glow：纸色光晕（压在深色画面上时）
+function column(chars, x, y, size, color, appear, opt = {}) {
+  const font = opt.font || 'WenKai', lead = opt.lead || 1.12, halo = opt.halo ?? 0;
+  let yy = y;
+  [...chars].forEach((ch, i) => {
+    const p = appear(i); const isP = PUNCT.has(ch);
+    if (ch === ' ') { yy += size * .5; return; }
+    const step = isP ? size * .55 : size * lead;
+    if (p > 0) {
+      const sz = isP ? size * .8 : size, cx = isP ? x + size * .32 : x, cy = isP ? yy + size * .05 : yy;
+      ctx.save();
+      ctx.font = `${sz}px ${font}`; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      const a = ease(p), blur = (1 - easeOut(p)) * 10, sc = 1 + (1 - easeOut(p)) * .06;
+      ctx.translate(cx, cy + sz / 2); ctx.scale(sc, sc); ctx.translate(-cx, -(cy + sz / 2));
+      if (halo > 0) { ctx.filter = `blur(${14 + blur}px)`; ctx.fillStyle = rgb(opt.haloColor || PAPER, halo * a); ctx.fillText(ch, cx, cy); ctx.fillText(ch, cx, cy); }
+      ctx.filter = `blur(${blur + 2.5}px)`; ctx.fillStyle = rgb(color, .28 * a); ctx.fillText(ch, cx, cy);   // 墨晕
+      ctx.filter = blur > .3 ? `blur(${blur}px)` : 'none'; ctx.fillStyle = rgb(color, .94 * a); ctx.fillText(ch, cx, cy);
+      ctx.restore();
+    }
+    yy += step;
+  });
+  return yy;
+}
+const stagger = (t, t0, gap, dur = 1.0) => i => (t - t0 - i * gap) / dur;
+const withFade = (f, t, tOut, d = .7) => i => Math.min(f(i), 1 - (t - tOut) / d);
+
+// 印章：朱红底，白文；边缘做出钤印的斑驳
+function seal(text, x, y, s, t0, t, opt = {}) {
+  const k = (t - t0) / .25; if (k <= 0) return;
+  const a = Math.min(1, k), sq = opt.rect ? [s * .62, s * 1.15] : [s, s];
+  ctx.save(); ctx.translate(x, y); ctx.rotate(opt.rot ?? -.02);
+  const sc = 1 + .12 * (1 - easeOut(Math.min(1, k))); ctx.scale(sc, sc);
+  ctx.globalCompositeOperation = 'multiply'; ctx.globalAlpha = a * .92;
+  ctx.fillStyle = CINNABAR; ctx.beginPath(); ctx.roundRect(-sq[0] / 2, -sq[1] / 2, sq[0], sq[1], s * .06); ctx.fill();
+  ctx.globalCompositeOperation = 'source-over'; ctx.fillStyle = rgb(PAPER);
+  ctx.font = `${opt.rect ? s * .42 : s * .4}px MaShan`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const chars = [...text];
+  if (chars.length === 4) { [[1, -1], [1, 1], [-1, -1], [-1, 1]].forEach(([cx, cy], i) => ctx.fillText(chars[i], cx * s * .22, cy * s * .22)); }
+  else chars.forEach((ch, i) => ctx.fillText(ch, 0, (i - (chars.length - 1) / 2) * (opt.rect ? s * .46 : s * .44)));
+  const r = rand(text.charCodeAt(0));   // 斑驳
+  for (let i = 0; i < 160; i++) { ctx.globalAlpha = a * (.25 + r() * .6); ctx.beginPath(); ctx.arc((r() - .5) * sq[0], (r() - .5) * sq[1], .6 + r() * 2.2, 0, 6.283); ctx.fill(); }
+  ctx.restore();
+}
+
+// ============================================================ 第二版：串联的动态镜头
+// 每段图生视频首帧是一幅画、尾帧是下一幅画，骑手一路骑过去；这里只负责按剪辑表取帧、上字、做“停”和片头片尾。
+let ED, SEC, SHOTS = [], T_STOP = 0, T_RESUME = 0, T_SCROLL = 0;
+const CLIP_FPS = 24, CLIP_N = {};
+const frameCache = new Map();
+function getFrame(clip, i) {
+  const key = clip + i;
+  if (!frameCache.has(key)) frameCache.set(key, loadImg(`build/v2/${clip}/${String(i).padStart(4, '0')}.jpg`));
+  return frameCache.get(key);
+}
+function shotAt(t) { if (t < SHOTS[0].t0) return { title: true, t0: 0, t1: SHOTS[0].t0 }; for (const s of SHOTS) if (t >= s.t0 && t < s.t1) return s; return SHOTS[SHOTS.length - 1]; }
+// 镜头 s 在时刻 t 对应源视频第几帧（整段线性拉伸）
+function srcFrame(s, t) { const n = CLIP_N[s.clip]; return Math.max(1, Math.min(n, 1 + Math.floor((t - s.t0) / (s.t1 - s.t0) * n))); }
+
+function drawFrame(im, zoom = 1, gray = 0) {
+  const dw = W * zoom, dh = H * zoom, x = (W - dw) / 2, y = (H - dh) / 2;
+  ctx.drawImage(im, x, y, dw, dh);
+  if (gray > 0) { ctx.save(); ctx.globalAlpha = gray; ctx.filter = 'grayscale(1) brightness(0.96)'; ctx.drawImage(im, x, y, dw, dh); ctx.restore(); }
+}
+// 文字一列：seg 分段逐字洇出；slam 的字直接砸出（极短、带一点放大回弹）
+function textItem(it, s, t) {
+  const tl = (t - s.t0) / SEC;                              // 镜内第几小节
+  const chars = [...it.col], upto = it.upto ?? chars.length, carry = it.carry ?? 0, gap = (it.gap ?? .09) * 4; // gap 单位：拍
+  const untilK = it.until != null ? 1 - (tl - it.until) / .35 : 1 - (t - (s.t1 - .25)) / .25;
+  const fadeShot = (s.next && s.next.carries) ? 1 : untilK;
+  const color = it.dark ? PAPER : INK, haloColor = it.dark ? [20, 19, 18] : PAPER;
+  const segs = (it.seg || []).slice().sort((a, b) => a[1] - b[1]);
+  column(it.col, it.x, it.y, it.size || 96, color, i => {
+    if (i >= upto) return 0;
+    if (i < carry) return Math.min(1, fadeShot);
+    let sg = null; for (const g of segs) if (g[1] <= i) sg = g;
+    if (!sg) return 0;
+    const at = sg[0] * 4 + (i - sg[1]) * gap;              // 拍
+    const slam = i < (it.slam ?? 0);
+    const p = (tl * 4 - at) / (slam ? .12 : 1.1);
+    return Math.min(p, fadeShot);
+  }, { halo: it.dark ? .55 : .62, haloColor, font: (it.size || 96) > 110 ? 'WenKaiM' : 'WenKai' });
+}
+
+async function draw(t) {
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1; ctx.filter = 'none';
+  const s = shotAt(t);
+  // ---------- 片头：一小节。墨滴落下，题目砸出来，然后第一镜从墨里洇出
+  if (t < SHOTS[0].t0 + .7) {
+    drawScene('P_paper', { x: .5, y: .5, z: 1 }, 1, { filter: 'brightness(1.06) contrast(0.92)' });
+    drawInkDrop(t, .05, W * .5, H * .76, 500);
+    const f = i => (t - .15 - i * .16) / .35;
+    column('山坡羊', 640, 470, 176, INK, f, { font: 'MaShan', lead: 1.06 });
+    column('外卖骑手', 462, 650, 92, INK, i => (t - .75 - i * .12) / .35, { font: 'WenKaiM', lead: 1.16 });
+    seal('网友', 462, 1150, 60, 1.5, t);
+  }
+  if (s.clip) {
+    const im = await getFrame(s.clip, srcFrame(s, t));
+    const beatPh = ((t - SHOTS[0].t0) / (SEC / 4)) % 1;
+    const pulse = t > SHOTS[0].t0 ? 1 + .012 * Math.exp(-beatPh * 6) * (s.calm ? 0 : 1) : 1;   // 鼓点上的轻推
+    const pIn = s === SHOTS[0] ? (t - s.t0) / .7 : 1;
+    if (pIn < 1) {   // 第一镜从墨里洇出
+      tctx.save(); tctx.globalCompositeOperation = 'source-over'; tctx.clearRect(0, 0, W, H); tctx.drawImage(im, 0, 0, W, H);
+      tctx.globalCompositeOperation = 'destination-in'; tctx.drawImage(inkMask(Math.max(0, pIn), { x: .5, y: .76, k: .5 }), 0, 0, W, H); tctx.restore();
+      ctx.drawImage(tmp, 0, 0);
+    } else drawFrame(im, pulse, s.gray ? s.gray(t) : 0);
+  } else if (s.stop) {   // 停：冻结在 c09 最后一帧，黄色褪去，四周压暗
+    const prev = s.prev, im = await getFrame(prev.clip, CLIP_N[prev.clip]);
+    drawFrame(im, 1, ease((t - s.t0) / (SEC * .6)));
+    vignette(.22 * ease((t - s.t0) / .4));
+  } else if (s.scroll) {   // 片尾：长路的最后一帧被墨洗成纸，收成手卷
+    const im = await getFrame('c10', CLIP_N.c10), k = ease((t - s.t0) / .9);
+    drawScene('P_paper', { x: .5, y: .5, z: 1 }, 1, { filter: 'brightness(1.06) contrast(0.92)' });
+    if (k < 1) { ctx.save(); ctx.globalAlpha = 1 - k; drawFrame(im); ctx.restore(); }
+    scroll(t, s.t0 + .35);
+  }
+  for (const it of (s.text || [])) textItem(it, s, t);
+  vignette(.14);
+  const end = ease((t - (TOTAL - .6)) / .6);
+  if (end > 0) { ctx.fillStyle = `rgba(8,7,6,${end})`; ctx.fillRect(0, 0, W, H); }
+}
+
+function scroll(t, t0) {
+  const cols = [
+    { s: '山坡羊 · 外卖骑手', size: 66, font: 'WenKaiM', y: 470 },
+    { s: '现代 · 网友', size: 38, y: 520, color: [90, 86, 82] },
+    { s: '黄衣黄帽，天黑天晓', size: 66, y: 470 },
+    { s: '寻常雨雪寻常道', size: 66, y: 470 },
+    { s: '过商超，望楼高，拿完预制拿烧烤', size: 66, y: 470 },
+    { s: '人间风月知多少', size: 66, y: 470 },
+    { s: '停，活不了；活，停不了', size: 66, y: 470, mark: true },
+  ];
+  const gap = 120, x0 = W / 2 + gap * (cols.length - 1) / 2 + 6;
+  cols.forEach((c, j) => {
+    const x = x0 - j * gap, tc = t0 + j * .16;
+    column(c.s, x, c.y, c.size, c.color || INK, i => (t - tc - i * .025) / .45, { font: c.font || 'WenKai', lead: 1.1 });
+    if (c.mark) {
+      let yy = c.y; [...c.s].forEach((ch, i) => {
+        const isP = PUNCT.has(ch), step = isP ? c.size * .55 : c.size * 1.1, k = (t - t0 - 2.0 - i * .07) / .2;
+        if (!isP && k > 0) { ctx.save(); ctx.globalAlpha = clamp(k) * .9; ctx.strokeStyle = CINNABAR; ctx.lineWidth = 3.2; ctx.beginPath(); ctx.arc(x + c.size * .72, yy + c.size * .5, 7, 0, 6.283 * easeOut(k)); ctx.stroke(); ctx.restore(); }
+        yy += step;
+      });
+    }
+  });
+  seal('人间', x0 + 2, 350, 62, t0 + 1.6, t, { rect: true });
+  seal('网友', x0 - gap, 520 + 38 * 1.1 * 6 + 80, 58, t0 + 1.3, t);
+  const tr = (t - T_DING - .2) / 1.8;       // 叮咚——新订单，骑手又出发
+  if (tr > 0 && tr < 1.1) {
+    const im = IMG.rider, hgt = 150, wid = hgt * im.width / im.height;
+    ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.drawImage(im, lerp(-wid, W + 20, easeInOut(Math.min(tr, 1))), 1660, wid, hgt); ctx.restore();
+  }
+}
+let T_DING = 0;
+
+window.renderFrame = async i => { await draw(i / FPS); };
+window.renderAt = async t => { await draw(t); };
+(async () => {
+  ED = await (await fetch('edit.json')).json();
+  FPS = ED.fps; SEC = 60 / ED.bpm * 4; BAR = SEC;
+  let t = ED.titleBars * SEC, prev = null;
+  for (const sh of ED.shots) {
+    const s = Object.assign({}, sh, { t0: t, t1: t + sh.bars * SEC, prev });
+    if (prev) prev.next = s; if (s.text && s.text.some(x => x.carry)) s.carries = true;
+    SHOTS.push(s); prev = s; t = s.t1;
+    if (s.stop) { T_STOP = s.t0; T_RESUME = s.t1; }
+    if (s.scroll) { T_SCROLL = s.t0; T_DING = s.t0 + 4.2; }
+  }
+  TOTAL = t; TOTAL_FRAMES = Math.round(TOTAL * FPS);
+  Object.assign(window, { TOTAL_FRAMES, FPS_OUT: FPS, CUES: { title: 0, first: SHOTS[0].t0, stop: T_STOP, resume: T_RESUME, scroll: T_SCROLL, ding: T_DING, total: TOTAL, shots: SHOTS.map(s => [s.clip || (s.stop ? 'stop' : 'scroll'), s.t0, s.t1]) } });
+  makeNoise();
+  for (const c of ['c01', 'c02', 'c03', 'c04', 'c05', 'c06', 'c07', 'c08', 'c09', 'c10']) CLIP_N[c] = (await (await fetch(`build/v2/${c}/count.txt`)).text()) | 0;
+  IMG.P_paper = await loadImg('art/jpg/P_paper.jpg'); IMG.rider = await loadImg('art/jpg/rider.png'); IMG.drop = await loadImg('art/jpg/drop.jpg');
+  await Promise.all(['WenKai', 'WenKaiM', 'MaShan'].map(f => document.fonts.load(`40px ${f}`, '山坡羊外卖骑手停活')));
+  document.body.classList.add('render'); window.__ready = true; await draw(0);
+})();
+</script>
+</body>
+</html>
