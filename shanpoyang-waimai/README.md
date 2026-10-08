@@ -10,7 +10,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| [`shanpoyang-waimai_1080p30.mp4`](shanpoyang-waimai_1080p30.mp4) | 第二版成片：1080×1920 · 30fps，-14 LUFS，诗句已烧录 |
+| [`shanpoyang-waimai_1080p30.mp4`](shanpoyang-waimai_1080p30.mp4) | 第二版成片：1080×1920 · 30fps，48 MB，-14 LUFS，诗句已烧录 |
 | [`cover.png`](cover.png) | 竖版封面 |
 
 第一版（2 分 08 秒，静态水墨画 + 镜头推移，古筝室内乐）在 git 历史里，源码仍在本目录：`index.html`、`music.py`、`timeline.json`。

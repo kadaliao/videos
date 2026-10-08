@@ -8,6 +8,5 @@ fonts/*.otf
 !fonts/*-sub.ttf
 audio/candidates/
 art/paint.log
-clips/*.mp4
 clips/*.log
 clips/*.jpg
