@@ -113,6 +113,8 @@ if __name__ == "__main__":
     build_dir("flute", "Woodwinds/Flute/susvib/*.wav", lambda f: .5, 150, 2000, octave_shift=1)
     build_dir("flute_exp", "Woodwinds/Flute/expvib/*.wav", lambda f: .6, 150, 2000, (.6, 2.0), octave_shift=1)
     build_dir("piano", "Keys/Upright Piano/Player_dyn[12]_rr1_*.wav", lambda f: vtag(f, {"dyn1": .3, "dyn2": .6}), 25, 4200, (.03, .5), norm=False, octave_shift="piano")
+    build_dir("vln_spic", "Strings/Violin Section/Spic/*_rr1.wav", lambda f: vtag(f, {"_v1": .35, "_v2": .8}), 150, 2500, (.0, .25), octave_shift=1)
+    build_dir("cel_spic", "Strings/Cello Section/spic/*_RR1.wav", lambda f: vtag(f, {"_v1": .35, "_v2": .6, "_v3": .8}), 50, 900, (.0, .25), octave_shift=1)
     build_dir("timp_roll", "Percussion/Timpani/Rolls/*.wav", lambda f: .7, 40, 300, (1.0, 3.0))
     build_dir("gong", "VSCO 1 Percussion/varMetal/Gong/gong_hit_m*.wav", lambda f: .5, 30, 1000, (.5, 2.0))
     build_dir("bdrum", "VSCO 1 Percussion/drums/bass/*.wav", lambda f: .5, 30, 300, (.01, .3))

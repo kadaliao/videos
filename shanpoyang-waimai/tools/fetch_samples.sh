@@ -10,7 +10,7 @@ fi
 cd "$S/VSCO-2-CE"
 git sparse-checkout init --no-cone
 git sparse-checkout set "Keys/Upright Piano/*" "Strings/Cello Section/susvib/*" "Strings/Viola Section/susvib/*" "Strings/Violin Section/susVib/*" \
-  "Strings/Solo Contrabass/SusVib/*" "Strings/Harp/*" "Woodwinds/Flute/susvib/*" "Woodwinds/Flute/expvib/*" "Percussion/Timpani/*" \
+  "Strings/Solo Contrabass/SusVib/*" "Strings/Harp/*" "Strings/Violin Section/Spic/*" "Strings/Cello Section/spic/*" "Woodwinds/Flute/susvib/*" "Woodwinds/Flute/expvib/*" "Percussion/Timpani/*" \
   "VSCO 1 Percussion/varMetal/Gong/*" "VSCO 1 Percussion/drums/bass/*" "Readme.txt"
 git checkout -q
 cd "$S/freesound"
