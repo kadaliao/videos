@@ -1,0 +1,10 @@
+node_modules/
+build/
+out/
+art/*.png
+art/test/
+fonts/*.ttf
+fonts/*.otf
+!fonts/*-sub.ttf
+audio/candidates/
+art/paint.log

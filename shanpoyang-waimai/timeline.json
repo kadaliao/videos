@@ -1,0 +1,28 @@
+{
+  "_": "画面与配乐共用的时间轴。单位：小节（72 BPM，4/4，一小节 = 10/3 秒）。render 和 music.py 都只读这里。",
+  "bpm": 72,
+  "beatsPerBar": 4,
+  "fps": 30,
+  "totalBars": 38.4,
+  "stopBar": 28,
+  "resumeBar": 30,
+  "dingBar": 36.25,
+  "sections": [
+    { "id": "title",  "bar": 0,     "scene": "paper" },
+    { "id": "l1",     "bar": 4,     "scene": "A_day",    "text": ["黄衣黄帽"] },
+    { "id": "l2a",    "bar": 8,     "scene": "B_night",  "text": ["天黑"] },
+    { "id": "l2b",    "bar": 10,    "scene": "C_dawn",   "text": ["天晓"] },
+    { "id": "l3a",    "bar": 12,    "scene": "D_rain",   "text": ["寻常雨雪"] },
+    { "id": "l3b",    "bar": 14,    "scene": "E_snow",   "text": ["寻常道"] },
+    { "id": "l4a",    "bar": 16,    "scene": "F_market", "text": ["过商超"] },
+    { "id": "l4b",    "bar": 18,    "scene": "G_tower",  "text": ["望楼高"] },
+    { "id": "l4c",    "bar": 20,    "scene": "H_bbq",    "text": ["拿完预制", "拿烧烤"] },
+    { "id": "l5",     "bar": 24,    "scene": "I_moon",   "text": ["人间风月知多少"] },
+    { "id": "rest",   "bar": 26.75, "scene": "J_rest" },
+    { "id": "stop",   "bar": 28,    "scene": "J_rest",   "text": ["停，", "活不了；"] },
+    { "id": "go",     "bar": 30,    "scene": "J_rest",   "text": ["活，", "停不了"] },
+    { "id": "road",   "bar": 31,    "scene": "K_road" },
+    { "id": "scroll", "bar": 33,    "scene": "paper" },
+    { "id": "end",    "bar": 38.4 }
+  ]
+}
