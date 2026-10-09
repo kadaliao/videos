@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>山坡羊·外卖骑手（第三版）</title>
+<style>
+  @font-face { font-family: "WenKai"; src: url("fonts/WenKai-sub.ttf"); }
+  @font-face { font-family: "WenKaiM"; src: url("fonts/WenKaiM-sub.ttf"); }
+  @font-face { font-family: "MaShan"; src: url("fonts/MaShan-sub.ttf"); }
+  html, body { margin: 0; background: #111; }
+  canvas { display: block; width: min(100vw, calc(100vh * 9 / 16)); height: auto; margin: 0 auto; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 8px; padding: 8px; background: #0008; color: #ccd; font: 13px/1.4 sans-serif; }
+  #bar input { flex: 1; }
+  body.render #bar { display: none; }
+</style>
+</head>
+<body>
+<canvas id="stage" width="1080" height="1920"></canvas>
+<div id="bar"><button id="play">播放</button><input id="seek" type="range" min="0" max="1000" value="0"><span id="clock">0.00</span></div>
+<script>
+// ============================================================ 基础
+// 画面只由时间 t 决定。时间轴（小节）与配乐共用 timeline.json：72 BPM，一小节 10/3 秒。
+const W = 1080, H = 1920;
+const cv = document.getElementById('stage'), ctx = cv.getContext('2d');
+const INK = [29, 27, 25], PAPER = [246, 241, 232], CINNABAR = '#b5322b';
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const ease = k => (k = clamp(k), k * k * (3 - 2 * k));
+const easeOut = k => 1 - Math.pow(1 - clamp(k), 3);
+const easeInOut = k => (k = clamp(k), k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+const rgb = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const mix3 = (a, b, k) => [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+function rand(seed) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); }
+
+let TL, FPS, BAR, STOP, RESUME, TOTAL, TOTAL_FRAMES;
+const B = (bar, beat = 0) => bar * BAR + beat * BAR / 4;
+// “停”的两小节里画面时间冻结：雨停在半空，镜头不动
+const frozen = t => t < STOP ? t : t < RESUME ? STOP : t - (RESUME - STOP);
+
+// ============================================================ 资源
+const IMG = {};
+const NAMES = ['A_day', 'B_night', 'C_dawn', 'D_rain', 'E_snow', 'F_market', 'G_tower', 'H_bbq', 'I_moon', 'J_rest', 'K_road', 'P_paper'];
+function loadImg(src) { return new Promise((ok, no) => { const im = new Image(); im.onload = () => ok(im); im.onerror = no; im.src = src; }); }
+
+// 低频噪声（墨晕开的边缘）
+const NW = 270, NH = 480; let NOISE;
+function makeNoise() {
+  const r = rand(7), g = (w, h) => Array.from({ length: (w + 1) * (h + 1) }, r);
+  const out = new Float32Array(NW * NH);
+  let amp = 1, tot = 0;
+  for (const cell of [96, 48, 24, 12, 6]) {
+    const gw = Math.ceil(NW / cell), gh = Math.ceil(NH / cell), grid = g(gw, gh);
+    for (let y = 0; y < NH; y++) for (let x = 0; x < NW; x++) {
+      const fx = x / cell, fy = y / cell, ix = fx | 0, iy = fy | 0, u = ease(fx - ix), v = ease(fy - iy);
+      const a = grid[iy * (gw + 1) + ix], b = grid[iy * (gw + 1) + ix + 1], c = grid[(iy + 1) * (gw + 1) + ix], d = grid[(iy + 1) * (gw + 1) + ix + 1];
+      out[y * NW + x] += amp * lerp(lerp(a, b, u), lerp(c, d, u), v);
+    }
+    tot += amp; amp *= .55;
+  }
+  for (let i = 0; i < out.length; i++) out[i] /= tot;
+  let mn = 1, mx = 0; for (const v of out) { mn = Math.min(mn, v); mx = Math.max(mx, v); }
+  for (let i = 0; i < out.length; i++) out[i] = (out[i] - mn) / (mx - mn);
+  NOISE = out;
+}
+const maskCv = document.createElement('canvas'); maskCv.width = NW; maskCv.height = NH; const mctx = maskCv.getContext('2d');
+const maskImg = mctx.createImageData(NW, NH);
+const tmp = document.createElement('canvas'); tmp.width = W; tmp.height = H; const tctx = tmp.getContext('2d');
+// 墨晕遮罩：p 从 0 到 1，噪声低的地方先显出来；dir 给一个方向偏置（墨从哪里洇开）
+function inkMask(p, dir = { x: .5, y: .5, k: .6 }) {
+  const d = maskImg.data;
+  for (let y = 0; y < NH; y++) for (let x = 0; x < NW; x++) {
+    const i = y * NW + x, dx = x / NW - dir.x, dy = (y / NH - dir.y) * 1.78;
+    const v = NOISE[i] * (1 - dir.k) + Math.min(1, Math.hypot(dx, dy) / 1.1) * dir.k;
+    d[i * 4 + 3] = 255 * clamp((p * 1.35 - v) * 7);
+  }
+  mctx.putImageData(maskImg, 0, 0);
+  return maskCv;
+}
+
+// ============================================================ 画面层
+// cam: {x, y, z}：图像上的归一化焦点 + 相对“铺满”的缩放
+function drawScene(name, cam, alpha = 1, opts = {}) {
+  const im = IMG[name]; if (!im || alpha <= 0) return;
+  const base = Math.max(W / im.width, H / im.height), s = base * cam.z;
+  const dw = im.width * s, dh = im.height * s;
+  let x = W / 2 - cam.x * dw, y = H / 2 - cam.y * dh;
+  x = clamp(x, W - dw, 0); y = clamp(y, H - dh, 0);
+  const c = opts.mask ? tctx : ctx;
+  if (opts.mask) { tctx.globalCompositeOperation = 'source-over'; tctx.clearRect(0, 0, W, H); }
+  c.save(); c.globalAlpha = opts.mask ? 1 : alpha;
+  if (opts.filter) c.filter = opts.filter;
+  c.drawImage(im, x, y, dw, dh); c.restore();
+  if (opts.gray > 0) { c.save(); c.globalAlpha = (opts.mask ? 1 : alpha) * opts.gray; c.filter = 'grayscale(1) brightness(0.97)'; c.drawImage(im, x, y, dw, dh); c.restore(); }
+  if (opts.mask) {
+    tctx.save(); tctx.globalCompositeOperation = 'destination-in'; tctx.imageSmoothingQuality = 'high';
+    tctx.drawImage(opts.mask, 0, 0, W, H); tctx.restore();
+    ctx.save(); ctx.globalAlpha = alpha; ctx.drawImage(tmp, 0, 0); ctx.restore();
+  }
+}
+const camLerp = (a, b, k) => ({ x: lerp(a.x, b.x, k), y: lerp(a.y, b.y, k), z: lerp(a.z, b.z, k) });
+
+// 雨：斜向的细笔，正片叠底；时间用冻结后的时钟
+const RAIN = (() => { const r = rand(11); return Array.from({ length: 340 }, () => ({ x: r() * 1.3 - .15, y: r(), len: 50 + r() * 120, sp: 1500 + r() * 1100, w: .8 + r() * 1.8, a: .10 + r() * .22 })); })();
+function drawRain(t, k, slant = .2) {
+  if (k <= 0) return;
+  ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.lineCap = 'round';
+  for (const d of RAIN) {
+    const y = ((d.y * (H + 300) + d.sp * t) % (H + 300)) - 150, x = d.x * W + slant * y;
+    ctx.strokeStyle = rgb([70, 68, 66], d.a * k); ctx.lineWidth = d.w;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + slant * d.len, y + d.len); ctx.stroke();
+  }
+  ctx.restore();
+}
+// 雪：纸色的点，大小不一，左右摆动
+const SNOW = (() => { const r = rand(23); return Array.from({ length: 420 }, () => ({ x: r(), y: r(), s: 1.2 + Math.pow(r(), 3) * 7, sp: 40 + r() * 110, ph: r() * 6.28, sw: 10 + r() * 40, a: .5 + r() * .5 })); })();
+function drawSnow(t, k) {
+  if (k <= 0) return;
+  ctx.save();
+  for (const f of SNOW) {
+    const y = ((f.y * (H + 40) + f.sp * t) % (H + 40)) - 20, x = ((f.x * W + Math.sin(t * .8 + f.ph) * f.sw + t * 18) % (W + 20)) - 10;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, f.s);
+    g.addColorStop(0, rgb(PAPER, f.a * k)); g.addColorStop(.55, rgb(PAPER, f.a * k * .6)); g.addColorStop(1, rgb(PAPER, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, f.s, 0, 6.283); ctx.fill();
+  }
+  ctx.restore();
+}
+// 烟：大团柔和的灰，缓缓上升、散开
+const SMOKE = (() => { const r = rand(31); return Array.from({ length: 16 }, () => ({ x: .25 + r() * .6, y: r(), r: 160 + r() * 260, sp: 18 + r() * 26, a: .05 + r() * .06, ph: r() * 6.28 })); })();
+function drawSmoke(t, k) {
+  if (k <= 0) return;
+  ctx.save(); ctx.globalCompositeOperation = 'multiply';
+  for (const s of SMOKE) {
+    const life = ((s.y * 40 + t) % 40) / 40, y = H * (1.05 - life * 1.1), x = s.x * W + Math.sin(t * .2 + s.ph) * 60, r = s.r * (0.7 + life * .8);
+    const a = s.a * k * Math.sin(Math.PI * life);
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, rgb([120, 118, 115], a)); g.addColorStop(1, rgb([120, 118, 115], 0));
+    ctx.fillStyle = g; ctx.fillRect(x - r, y - r, 2 * r, 2 * r);
+  }
+  ctx.restore();
+}
+// 薄雾横移
+function drawMist(t, k, y0 = .6) {
+  if (k <= 0) return;
+  ctx.save();
+  for (let i = 0; i < 6; i++) {
+    const y = H * (y0 + .06 * Math.sin(i * 1.7)), x = ((i * 380 + t * (14 + i * 3)) % (W + 900)) - 450, r = 420 + i * 30;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, rgb(PAPER, .16 * k)); g.addColorStop(1, rgb(PAPER, 0));
+    ctx.save(); ctx.translate(x, y); ctx.scale(1.8, .45); ctx.translate(-x, -y);
+    ctx.fillStyle = g; ctx.fillRect(x - r, y - r, 2 * r, 2 * r); ctx.restore();
+  }
+  ctx.restore();
+}
+// 一滴墨在纸上洇开：真实的墨滴图（Gemini 绘），从中心向外“渗”出来，再慢慢淡去
+function drawInkDrop(t, t0, x, y, size) {
+  const k = (t - t0) / 2.8; if (k <= 0 || k > 2.2) return;
+  const r = size * .5 * (.12 + .88 * easeOut(Math.min(k, 1))), a = .92 * (1 - ease((k - .55) / 1.4));
+  tctx.save(); tctx.globalCompositeOperation = 'source-over'; tctx.clearRect(0, 0, W, H);
+  tctx.drawImage(IMG.drop, x - size / 2, y - size / 2, size, size);
+  const g = tctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(.8, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  tctx.globalCompositeOperation = 'destination-in'; tctx.fillStyle = g; tctx.fillRect(0, 0, W, H); tctx.restore();
+  ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.globalAlpha = a; ctx.drawImage(tmp, 0, 0); ctx.restore();
+}
+function vignette(k = .22) {
+  const g = ctx.createRadialGradient(W / 2, H * .48, H * .3, W / 2, H * .5, H * .78);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, `rgba(20,18,16,${k})`);
+  ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); ctx.restore();
+}
+
+// ============================================================ 文字：竖排，一字一字由洇到清
+const PUNCT = new Set(['，', '；', '。', '、']);
+// chars: 字符串；x: 列中心；y: 首字顶；size；color: [r,g,b]；appear(i)→0..1；glow：纸色光晕（压在深色画面上时）
+function column(chars, x, y, size, color, appear, opt = {}) {
+  const font = opt.font || 'WenKai', lead = opt.lead || 1.12, halo = opt.halo ?? 0;
+  let yy = y;
+  [...chars].forEach((ch, i) => {
+    const p = appear(i); const isP = PUNCT.has(ch);
+    if (ch === ' ') { yy += size * .5; return; }
+    const step = isP ? size * .55 : size * lead;
+    if (p > 0) {
+      const sz = isP ? size * .8 : size, cx = isP ? x + size * .32 : x, cy = isP ? yy + size * .05 : yy;
+      ctx.save();
+      ctx.font = `${sz}px ${font}`; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      const a = ease(p), blur = (1 - easeOut(p)) * 10, sc = 1 + (1 - easeOut(p)) * .06;
+      ctx.translate(cx, cy + sz / 2); ctx.scale(sc, sc); ctx.translate(-cx, -(cy + sz / 2));
+      if (halo > 0) { ctx.filter = `blur(${14 + blur}px)`; ctx.fillStyle = rgb(opt.haloColor || PAPER, halo * a); ctx.fillText(ch, cx, cy); ctx.fillText(ch, cx, cy); }
+      ctx.filter = `blur(${blur + 2.5}px)`; ctx.fillStyle = rgb(color, .28 * a); ctx.fillText(ch, cx, cy);   // 墨晕
+      ctx.filter = blur > .3 ? `blur(${blur}px)` : 'none'; ctx.fillStyle = rgb(color, .94 * a); ctx.fillText(ch, cx, cy);
+      ctx.restore();
+    }
+    yy += step;
+  });
+  return yy;
+}
+const stagger = (t, t0, gap, dur = 1.0) => i => (t - t0 - i * gap) / dur;
+const withFade = (f, t, tOut, d = .7) => i => Math.min(f(i), 1 - (t - tOut) / d);
+
+// 印章：朱红底，白文；边缘做出钤印的斑驳
+function seal(text, x, y, s, t0, t, opt = {}) {
+  const k = (t - t0) / .25; if (k <= 0) return;
+  const a = Math.min(1, k), sq = opt.rect ? [s * .62, s * 1.15] : [s, s];
+  ctx.save(); ctx.translate(x, y); ctx.rotate(opt.rot ?? -.02);
+  const sc = 1 + .12 * (1 - easeOut(Math.min(1, k))); ctx.scale(sc, sc);
+  ctx.globalCompositeOperation = 'multiply'; ctx.globalAlpha = a * .92;
+  ctx.fillStyle = CINNABAR; ctx.beginPath(); ctx.roundRect(-sq[0] / 2, -sq[1] / 2, sq[0], sq[1], s * .06); ctx.fill();
+  ctx.globalCompositeOperation = 'source-over'; ctx.fillStyle = rgb(PAPER);
+  ctx.font = `${opt.rect ? s * .42 : s * .4}px MaShan`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const chars = [...text];
+  if (chars.length === 4) { [[1, -1], [1, 1], [-1, -1], [-1, 1]].forEach(([cx, cy], i) => ctx.fillText(chars[i], cx * s * .22, cy * s * .22)); }
+  else chars.forEach((ch, i) => ctx.fillText(ch, 0, (i - (chars.length - 1) / 2) * (opt.rect ? s * .46 : s * .44)));
+  const r = rand(text.charCodeAt(0));   // 斑驳
+  for (let i = 0; i < 160; i++) { ctx.globalAlpha = a * (.25 + r() * .6); ctx.beginPath(); ctx.arc((r() - .5) * sq[0], (r() - .5) * sq[1], .6 + r() * 2.2, 0, 6.283); ctx.fill(); }
+  ctx.restore();
+}
+
+function shotAt(t) { if (t < SHOTS[0].t0) return { title: true, t0: 0, t1: SHOTS[0].t0 }; for (const s of SHOTS) if (t >= s.t0 && t < s.t1) return s; return SHOTS[SHOTS.length - 1]; }
+// 文字一列：seg 分段逐字洇出；slam 的字直接砸出（极短、带一点放大回弹）
+function textItem(it, s, t) {
+  const tl = (t - s.t0) / SEC;                              // 镜内第几小节
+  const chars = [...it.col], upto = it.upto ?? chars.length, carry = it.carry ?? 0, gap = (it.gap ?? .09) * 4; // gap 单位：拍
+  const untilK = it.until != null ? 1 - (tl - it.until) / .35 : 1 - (t - (s.t1 - .25)) / .25;
+  const fadeShot = it.until != null ? untilK : (s.next && s.next.carries) ? 1 : untilK;
+  const color = it.dark ? PAPER : INK, haloColor = it.dark ? [20, 19, 18] : PAPER;
+  const segs = (it.seg || []).slice().sort((a, b) => a[1] - b[1]);
+  column(it.col, it.x, it.y, it.size || 96, color, i => {
+    if (i >= upto) return 0;
+    if (i < carry) return Math.min(1, fadeShot);
+    let sg = null; for (const g of segs) if (g[1] <= i) sg = g;
+    if (!sg) return 0;
+    const at = sg[0] * 4 + (i - sg[1]) * gap;              // 拍
+    const slam = i < (it.slam ?? 0);
+    const p = (tl * 4 - at) / (slam ? .12 : 1.1);
+    return Math.min(p, fadeShot);
+  }, { halo: it.dark ? .55 : .62, haloColor, font: (it.size || 96) > 110 ? 'WenKaiM' : 'WenKai' });
+}
+
+function scroll(t, t0) {
+  const cols = [
+    { s: '山坡羊 · 外卖骑手', size: 66, font: 'WenKaiM', y: 470 },
+    { s: '现代 · 网友', size: 38, y: 520, color: [90, 86, 82] },
+    { s: '黄衣黄帽，天黑天晓', size: 66, y: 470 },
+    { s: '寻常雨雪寻常道', size: 66, y: 470 },
+    { s: '过商超，望楼高，拿完预制拿烧烤', size: 66, y: 470 },
+    { s: '人间风月知多少', size: 66, y: 470 },
+    { s: '停，活不了；活，停不了', size: 66, y: 470, mark: true },
+  ];
+  const gap = 120, x0 = W / 2 + gap * (cols.length - 1) / 2 + 6;
+  cols.forEach((c, j) => {
+    const x = x0 - j * gap, tc = t0 + j * .16;
+    column(c.s, x, c.y, c.size, c.color || INK, i => (t - tc - i * .025) / .45, { font: c.font || 'WenKai', lead: 1.1 });
+    if (c.mark) {
+      let yy = c.y; [...c.s].forEach((ch, i) => {
+        const isP = PUNCT.has(ch), step = isP ? c.size * .55 : c.size * 1.1, k = (t - t0 - 2.0 - i * .07) / .2;
+        if (!isP && k > 0) { ctx.save(); ctx.globalAlpha = clamp(k) * .9; ctx.strokeStyle = CINNABAR; ctx.lineWidth = 3.2; ctx.beginPath(); ctx.arc(x + c.size * .72, yy + c.size * .5, 7, 0, 6.283 * easeOut(k)); ctx.stroke(); ctx.restore(); }
+        yy += step;
+      });
+    }
+  });
+  seal('人间', x0 + 2, 350, 62, t0 + 1.6, t, { rect: true });
+  seal('网友', x0 - gap, 520 + 38 * 1.1 * 6 + 80, 58, t0 + 1.3, t);
+  const tr = (t - T_DING - .2) / 1.8;       // 叮咚——新订单，骑手又出发
+  if (tr > 0 && tr < 1.1) {
+    const im = IMG.rider, hgt = 150, wid = hgt * im.width / im.height;
+    ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.drawImage(im, lerp(-wid, W + 20, easeInOut(Math.min(tr, 1))), 1660, wid, hgt); ctx.restore();
+  }
+}
+
+// ============================================================ 第三版：一幅一直在展开的手卷（全部 JS 绘制）
+// 横卷全景按骑行顺序接成长卷，相邻两幅在雾里交融；骑手（单独的骑行像）一直在路上骑，镜头跟着平移、仰俯、推拉。
+// 动起来的一切——车轮、颠簸、刹车前倾、墨影拖尾、倒影、车辙、外卖袋、雨雪烟雾、昼夜、路灯前景——都由代码按时间 t 画出。
+let ED, SEC, SHOTS = [], T_STOP = 0, T_RESUME = 0, T_SCROLL = 0, T_DING = 0;
+const PW = 6336, PH = 2688, WW = PW * H / PH;            // 全景在世界坐标里的宽度（缩放 1 时与画布等高）
+const ROAD = { P1_city: .755, P2_rain: .665, P3_snow: .735, P4_market: .72, P6_bbq: .815, P7_moon: .82 };
+const OV = 900;                                          // 相邻全景的交融宽度
+let RIG, BODY, DISC, WINDOWS = [];
+const bars = t => t / SEC;
+// 关键帧：[[小节, 值, 缓动], ...]，缓动作用于到达该帧的那一段：'l' 线性 'o' 减速 'i' 加速 's' 两头缓
+function kf(tb, keys) {
+  if (tb <= keys[0][0]) return keys[0][1];
+  for (let i = 1; i < keys.length; i++) if (tb <= keys[i][0]) {
+    const [b0, v0] = keys[i - 1], [b1, v1, e = 'l'] = keys[i]; let k = (tb - b0) / (b1 - b0);
+    k = e === 'o' ? 1 - (1 - k) * (1 - k) : e === 'i' ? k * k : e === 's' ? easeInOut(k) : k;
+    return lerp(v0, v1, k);
+  }
+  return keys[keys.length - 1][1];
+}
+// ---------- 长卷 A（白天到超市）：按速度积分出镜头位置，再把每幅全景的中心放在它那一段的中点
+const VEL_A = [[1, 0], [1.35, 470, 's'], [4.4, 470], [4.9, 760, 's'], [8.5, 760], [9.85, 0, 'o']];
+const STEP = 1 / 120; const CAM_A = [];
+function buildA() { let c = 760; for (let tb = 0; tb <= 10.01; tb += STEP) { CAM_A.push(c); c += kf(tb, VEL_A) * STEP * SEC; } }
+const camA = tb => { const i = clamp((tb) / STEP, 0, CAM_A.length - 1); const j = Math.floor(i); return lerp(CAM_A[j], CAM_A[Math.min(j + 1, CAM_A.length - 1)], i - j); };
+let STRIP_A, STRIP_B, STRIP_C;
+function layout() {
+  const mid = (b0, b1) => camA((b0 + b1) / 2);
+  STRIP_A = [{ n: 'P1_city', S: 0 }, { n: 'P2_rain', S: mid(4.5, 6.5) - WW / 2 }, { n: 'P3_snow', S: mid(6.5, 8.5) - WW / 2 }, { n: 'P4_market', S: camA(9.85) - WW * .5 }];
+  for (let i = 1; i < STRIP_A.length; i++) STRIP_A[i].S = Math.min(STRIP_A[i].S, STRIP_A[i - 1].S + WW - 700);   // 保证相邻两幅有交融区
+  STRIP_B = [{ n: 'P6_bbq', S: 0 }, { n: 'P7_moon', S: 0 }];
+  STRIP_B[1].S = Math.min(kf(14.9, CAM_B) - WW * .45, WW - 700);
+  STRIP_C = [{ n: 'P2_rain', S: 0 }];
+}
+// ---------- 长卷 B（烧烤 → 月亮 → 路边）：骑手骑进来、停下拿外卖、再骑走
+const CAM_B = [[12, 2150], [13.45, 2300, 's'], [14, 2900, 'i'], [16.85, 7300, 'o']];
+const RID_B = [[12.25, 1200], [12.9, 2245, 'o'], [13.45, 2245], [14, 2840, 'i'], [16.85, 7225, 'o']];
+const RID_C = [[19, 900], [19.15, 900], [20.7, 3500, 'i']];
+const CAM_C = [[19, 980], [20.7, 3420, 'i']];
+
+function roadAt(strip, p) {   // 在长卷进度 p 处的路面高度（世界 y），交融区内线性过渡
+  let y = null;
+  for (let i = 0; i < strip.length; i++) {
+    const s = strip[i]; if (p < s.S || p > s.S + WW) continue;
+    const r = ROAD[s.n] * H;
+    if (y == null) y = r; else y = lerp(y, r, clamp((p - s.S) / OV));
+  }
+  return y ?? ROAD[strip[0].n] * H;
+}
+function panelRect(s, cam) { return { x: W / 2 - (s.S + WW - cam.c) * cam.z, y: H / 2 - cam.cy * cam.z, w: WW * cam.z, h: H * cam.z }; }
+function drawStrip(strip, cam, wash = 0) {
+  ctx.fillStyle = rgb(PAPER); ctx.fillRect(0, 0, W, H);
+  strip.forEach((s, i) => {
+    const r = panelRect(s, cam); if (r.x > W || r.x + r.w < 0) return;
+    const im = IMG[s.n];
+    if (i === 0) { ctx.drawImage(im, r.x, r.y, r.w, r.h); return; }
+    // 后一幅从它的右缘起在 OV 宽度内由透明到不透明，边缘带一点墨的毛糙
+    tctx.save(); tctx.globalCompositeOperation = 'source-over'; tctx.clearRect(0, 0, W, H); tctx.drawImage(im, r.x, r.y, r.w, r.h);
+    const xR = r.x + r.w, xL = xR - OV * cam.z;
+    if (xL < W) {
+      const g = tctx.createLinearGradient(xR, 0, xL, 0); g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,1)');
+      tctx.globalCompositeOperation = 'destination-in'; tctx.fillStyle = g; tctx.fillRect(0, 0, W, H);
+    }
+    tctx.restore(); ctx.drawImage(tmp, 0, 0);
+    // 交融处飘一层雾
+    const xm = (xR + xL) / 2; if (xm > -600 && xm < W + 600) {
+      ctx.save(); const gm = ctx.createRadialGradient(xm, H * .45, 0, xm, H * .45, OV * cam.z * .6);
+      gm.addColorStop(0, rgb(PAPER, .55)); gm.addColorStop(1, rgb(PAPER, 0)); ctx.fillStyle = gm;
+      ctx.translate(xm, H * .45); ctx.scale(1, 2.2); ctx.translate(-xm, -H * .45); ctx.fillRect(xm - OV, 0, OV * 2, H); ctx.restore();
+    }
+  });
+  if (wash > 0) nightWash(wash);
+}
+function nightWash(k, moon = null) {
+  ctx.save(); ctx.globalCompositeOperation = 'multiply';
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, rgb([28, 27, 26], k)); g.addColorStop(.6, rgb([70, 68, 66], k)); g.addColorStop(1, rgb([110, 107, 104], k));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); ctx.restore();
+}
+// 夜里亮起的窗：从白天那幅城市山水的楼体暗部里取点
+function lightWindows(strip, cam, k, t) {
+  if (k <= 0) return; const s = strip[0], r = panelRect(s, cam);
+  ctx.save();
+  for (const w of WINDOWS) {
+    const x = r.x + w.u * r.w, y = r.y + w.v * r.h; if (x < -5 || x > W + 5) continue;
+    const fl = .65 + .35 * Math.sin(t * w.f + w.ph);
+    ctx.fillStyle = rgb([250, 244, 226], k * fl * w.a); ctx.fillRect(x, y, 2.2 * cam.z, 3.4 * cam.z);
+  }
+  ctx.restore();
+}
+function moonDisc(x, y, rad, k) {
+  if (k <= 0) return; ctx.save();
+  const g = ctx.createRadialGradient(x, y, rad * .9, x, y, rad * 3.2); g.addColorStop(0, rgb([235, 230, 220], .35 * k)); g.addColorStop(1, rgb([235, 230, 220], 0));
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, rad * 3.2, 0, 6.283); ctx.fill();
+  ctx.fillStyle = rgb([248, 244, 236], .95 * k); ctx.beginPath(); ctx.arc(x, y, rad, 0, 6.283); ctx.fill(); ctx.restore();
+}
+// 前景路灯：比背景走得快（视差），失焦
+function lampPosts(cam, k, t, night = 1, spacing = 1150, par = 1.45) {
+  if (k <= 0) return;
+  const base = cam.c * par;
+  for (let i = Math.floor((base - 1400) / spacing); i <= Math.floor((base + 1400) / spacing); i++) {
+    const q = i * spacing + ((i * 7919) % 300); const x = W / 2 - (q - base) * cam.z;
+    if (x < -80 || x > W + 80) continue;
+    ctx.save(); ctx.globalAlpha = k * .85; ctx.filter = 'blur(5px)'; ctx.fillStyle = rgb([22, 21, 20]);
+    ctx.fillRect(x - 13, -20, 26, H * .93); ctx.fillRect(x - 13, H * .1, 110 * (i % 2 ? 1 : -1), 16);
+    ctx.restore();
+    if (night > 0) { const lx = x + 95 * (i % 2 ? 1 : -1); const g = ctx.createRadialGradient(lx, H * .1 + 22, 0, lx, H * .1 + 22, 170);
+      g.addColorStop(0, rgb([250, 245, 225], .5 * night * k)); g.addColorStop(1, rgb([250, 245, 225], 0)); ctx.fillStyle = g; ctx.fillRect(lx - 170, H * .1 - 150, 340, 340); }
+  }
+}
+// 速度线：前景里横着掠过的枯笔
+const STREAKS = (() => { const r = rand(77); return Array.from({ length: 26 }, () => ({ y: .55 + r() * .45, len: 200 + r() * 500, w: 2 + r() * 7, o: r() * 4000, a: .08 + r() * .14 })); })();
+function speedLines(c, k) {
+  if (k <= 0) return; ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.lineCap = 'round';
+  for (const s of STREAKS) { const x = ((s.o + c * 2.1) % 4000) - 1500; ctx.strokeStyle = rgb([60, 58, 55], s.a * k); ctx.lineWidth = s.w;
+    ctx.beginPath(); ctx.moveTo(x, s.y * H); ctx.lineTo(x + s.len, s.y * H + 2); ctx.stroke(); }
+  ctx.restore();
+}
+
+// ---------- 骑手
+const RIDER_H = 600;                                     // 世界坐标里的骑手身高（像素）
+function buildRider() {
+  const im = IMG.S1_ride, wh = RIG.S1_ride.wheels[0];
+  BODY = document.createElement('canvas'); BODY.width = im.width; BODY.height = im.height;
+  const b = BODY.getContext('2d'); b.drawImage(im, 0, 0);
+  b.globalCompositeOperation = 'destination-out'; b.beginPath(); b.arc(wh.x, wh.y, wh.r * 1.02, 0, 6.283); b.fill();
+  DISC = document.createElement('canvas'); DISC.width = DISC.height = wh.r * 2 + 8;
+  const d = DISC.getContext('2d'); d.beginPath(); d.arc(wh.r + 4, wh.r + 4, wh.r * 1.02, 0, 6.283); d.clip(); d.drawImage(im, -(wh.x - wh.r - 4), -(wh.y - wh.r - 4));
+}
+// st: {x, y(路面屏幕坐标), z, dist(累计里程，转轮子), v(速度 px/s), a(加速度), bags, gray, reflect, trail}
+function drawRider(st, t) {
+  const im = IMG.S1_ride, rig = RIG.S1_ride, k = RIDER_H / im.height * st.z;
+  const vn = clamp(Math.abs(st.v) / 700);
+  const bob = Math.sin(t * 2 * Math.PI * 4.3) * 1.6 * vn * st.z + Math.sin(t * 2 * Math.PI * 1.7 + 1) * 1.0 * vn * st.z;
+  const lean = clamp(st.a * .00004, -.06, .05);
+  const ox = st.x - im.width / 2 * k, oy = st.y - rig.ground * k + bob;
+  const wh = rig.wheels[0], ang = -st.dist / (wh.r * RIDER_H / im.height);
+  const paint = (alpha, dx = 0, filt = 'none', flipY = false) => {
+    ctx.save(); ctx.globalAlpha = alpha; ctx.filter = filt;
+    const px = ox + rig.wheels[1].x * k, py = st.y;        // 绕后轮着地点转（刹车前倾）
+    ctx.translate(px + dx, py); ctx.rotate(lean); if (flipY) ctx.scale(1, -.62); ctx.translate(-px, -py);
+    ctx.drawImage(BODY, ox, oy, im.width * k, im.height * k);
+    ctx.translate(ox + wh.x * k, oy + wh.y * k); ctx.rotate(ang);
+    ctx.drawImage(DISC, -DISC.width / 2 * k, -DISC.height / 2 * k, DISC.width * k, DISC.height * k);
+    ctx.restore();
+    drawBags(st, t, ox + dx, oy, k, alpha, lean, flipY);
+  };
+  // 地上的影子
+  ctx.save(); ctx.globalCompositeOperation = 'multiply'; const sg = ctx.createRadialGradient(st.x, st.y, 0, st.x, st.y, im.width * k * .55);
+  sg.addColorStop(0, rgb([60, 58, 55], .35)); sg.addColorStop(1, rgb([60, 58, 55], 0)); ctx.fillStyle = sg;
+  ctx.translate(st.x, st.y); ctx.scale(1, .12); ctx.translate(-st.x, -st.y); ctx.fillRect(st.x - 600, st.y - 600, 1200, 1200); ctx.restore();
+  if (st.reflect) paint(.2, 0, 'blur(2px)', true);
+  if (st.trail && vn > .45) for (let i = 1; i <= 3; i++) paint(.09 * (vn - .3) / i, st.v * .014 * i * st.z, 'blur(3px)');
+  paint(1);
+  if (st.gray > 0) { ctx.save(); ctx.globalAlpha = st.gray; ctx.filter = 'grayscale(1)'; ctx.drawImage(BODY, ox, oy, im.width * k, im.height * k); ctx.restore(); }
+}
+// 外卖袋：白塑料袋（墨线勾边），一个个挂上车把、摞到箱子上，随车晃动
+function drawBags(st, t, ox, oy, k, alpha, lean, flipY) {
+  if (!st.bags || flipY) return;
+  const swing = Math.sin(t * 6.2) * .12 * clamp(Math.abs(st.v) / 600) + clamp(-st.a * .0002, -.25, .25);
+  const bag = (hx, hy, w, h, pop, sk) => {
+    const p = easeOut(pop); if (p <= 0) return;
+    ctx.save(); ctx.globalAlpha = alpha; ctx.translate(ox + hx * k, oy + hy * k); ctx.rotate(swing * (sk ? 0 : 1)); ctx.scale(p, p);
+    const ww = w * k, hh = h * k; ctx.lineWidth = 1.9 * k / .16; ctx.strokeStyle = rgb([45, 43, 40], .85); ctx.filter = 'blur(0.6px)';
+    const gf = ctx.createLinearGradient(-ww * .5, 0, ww * .5, hh); gf.addColorStop(0, rgb([246, 243, 236], .93)); gf.addColorStop(.7, rgb([222, 218, 210], .93)); gf.addColorStop(1, rgb([185, 181, 174], .93)); ctx.fillStyle = gf;
+    ctx.beginPath(); ctx.moveTo(-ww * .18, 0); ctx.quadraticCurveTo(-ww * .25, hh * .15, -ww * .5, hh * .3); ctx.quadraticCurveTo(-ww * .58, hh * .85, -ww * .3, hh);
+    ctx.lineTo(ww * .32, hh); ctx.quadraticCurveTo(ww * .58, hh * .82, ww * .5, hh * .3); ctx.quadraticCurveTo(ww * .25, hh * .15, ww * .18, 0); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, hh * .02, ww * .16, Math.PI, 0); ctx.stroke();                 // 提手
+    ctx.strokeStyle = rgb([120, 116, 110], .5); ctx.beginPath(); ctx.moveTo(-ww * .1, hh * .25); ctx.quadraticCurveTo(-ww * .05, hh * .6, -ww * .15, hh * .9); ctx.stroke();   // 袋子褶皱
+    if (sk) { ctx.strokeStyle = rgb([60, 50, 40], .9); ctx.lineWidth = 1.6 * k / .16; for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.moveTo(-ww * .25 + i * ww * .12, hh * .35); ctx.lineTo(-ww * .32 + i * ww * .15, -hh * .35); ctx.stroke(); } }   // 烤串签子
+    ctx.restore();
+  };
+  bag(800, 880, 230, 300, st.bags[0]); bag(740, 900, 210, 270, st.bags[1]); bag(1540, 470, 300, 300, st.bags[2], true);
+}
+
+// ---------- 镜头与骑手的时间表
+function stateAt(t) {
+  const tb = bars(t); const pulse = 1 + .01 * Math.exp(-((t / (SEC / 4)) % 1) * 6);
+  if (tb < 10) {   // 长卷 A
+    const c = camA(tb), dt = .02, v = (camA(bars(t + dt)) - camA(bars(t - dt))) / (2 * dt), a = (camA(bars(t + dt)) - 2 * c + camA(bars(t - dt))) / (dt * dt);
+    return { strip: STRIP_A, cam: { c, cy: H / 2, z: 1.0 * pulse }, r: c - 80, v, a, dist: c, night: kf(tb, [[2.2, 0], [2.95, 1, 's'], [3.25, 1], [4.1, 0, 's']]) };
+  }
+  if (tb >= 12 && tb < 17.2) {   // 长卷 B
+    const c = kf(tb, CAM_B), r = kf(tb, RID_B), dt = .02;
+    const v = (kf(bars(t + dt), RID_B) - kf(bars(t - dt), RID_B)) / (2 * dt), a = (kf(bars(t + dt), RID_B) - 2 * r + kf(bars(t - dt), RID_B)) / (dt * dt);
+    const z = kf(tb, [[12, 1.4], [12.85, 1.0, 's'], [14, 1.0], [14.55, 1.38, 's'], [15.15, 1.38], [15.9, 1.0, 's']]);
+    const top = H / 2 / z;
+    const cy = kf(tb, [[12, top], [12.85, H / 2, 's'], [14, H / 2], [14.55, H / 2 / 1.38, 's'], [15.15, H / 2 / 1.38], [15.9, H / 2, 's']]);
+    return { strip: STRIP_B, cam: { c, cy, z: z * pulse }, r, v, a, dist: r };
+  }
+  if (tb >= 19 && tb < 21) {     // 长卷 C：重新上路
+    const c = kf(tb, CAM_C), r = kf(tb, RID_C), dt = .02;
+    const v = (kf(bars(t + dt), RID_C) - kf(bars(t - dt), RID_C)) / (2 * dt), a = (kf(bars(t + dt), RID_C) - 2 * r + kf(bars(t - dt), RID_C)) / (dt * dt);
+    return { strip: STRIP_C, cam: { c, cy: H / 2, z: kf(tb, [[19, 1.12], [20.7, 1.0, 's']]) }, r, v, a, dist: r };
+  }
+  return null;
+}
+function riderScreen(st) {
+  const x = W / 2 - (st.r - st.cam.c) * st.cam.z;
+  const y = H / 2 + (roadAt(st.strip, st.r) - st.cam.cy) * st.cam.z;
+  return { x, y };
+}
+const panelName = (strip, p) => { let n = strip[0].n; for (const s of strip) if (p >= s.S + OV * .5) n = s.n; return n; };
+
+function drawStripScene(st, t) {
+  const tb = bars(t);
+  drawStrip(st.strip, st.cam);
+  const pn = panelName(st.strip, st.cam.c);
+  if (st.night) { nightWash(st.night * .82); lightWindows(st.strip, st.cam, st.night, t); moonDisc(250, 380, 52, st.night); }
+  if (tb >= 19) nightWash(.55);
+  if (tb >= 3.1 && tb < 4.4) moonDisc(820, 560 - 260 * clamp((tb - 3.1) / 1.3), 60, ease((tb - 3.2) / .5) * (1 - ease((tb - 4.0) / .4)) * .6);   // 黎明的日头，淡淡的
+  const rs = riderScreen(st);
+  // 雪地车辙
+  if (pn === 'P3_snow') { ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.strokeStyle = rgb([70, 68, 64], .55); ctx.lineWidth = 6 * st.cam.z; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(rs.x + 140 * st.cam.z, rs.y - 2); ctx.lineTo(W + 50, rs.y + 6); ctx.stroke(); ctx.restore(); }
+  const bags = st.strip === STRIP_B || tb >= 19 ? [(tb - 12.62) / .18, (tb - 12.92) / .18, (tb - 13.27) / .2].map(x => tb >= 19 ? 1 : clamp(x)) : null;
+  drawRider({ x: rs.x, y: rs.y, z: st.cam.z, dist: st.dist, v: st.v, a: st.a, bags, reflect: pn === 'P2_rain' || pn === 'P4_market' || tb >= 19, trail: true }, t);
+  // 天气与烟
+  if (pn === 'P2_rain' || tb >= 19) drawRain(t, 1, .22);
+  if (pn === 'P3_snow') drawSnow(t, 1);
+  if (st.strip === STRIP_B && tb < 14.6) drawSmoke(t * 2.2, 1);
+  if (st.strip === STRIP_B && tb >= 16) drawRain(t, ease((tb - 16) / .4), .2);
+  speedLines(st.dist, clamp((Math.abs(st.v) - 520) / 400));
+}
+
+// ---------- 插入镜头（第一版的竖幅画）：楼、路边、长路
+function insert(name, cam, opts = {}) { drawScene(name, cam, 1, opts); }
+
+async function draw(t) {
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1; ctx.filter = 'none';
+  const tb = bars(t), sh = shotAt(t), st = stateAt(t);
+  // 片头
+  if (tb < 1.3) {
+    drawScene('P_paper', { x: .5, y: .5, z: 1 }, 1, { filter: 'brightness(1.06) contrast(0.92)' });
+    drawInkDrop(t, .05, W * .5, H * .76, 500);
+    column('山坡羊', 640, 470, 176, INK, i => (t - .15 - i * .16) / .35, { font: 'MaShan', lead: 1.06 });
+    column('外卖骑手', 462, 650, 92, INK, i => (t - .75 - i * .12) / .35, { font: 'WenKaiM', lead: 1.16 });
+    seal('网友', 462, 1150, 60, 1.5, t);
+  }
+  const reveal = (fn, p, dir) => {   // 用墨晕遮罩把新画面洇进来
+    if (p >= 1) return fn();
+    if (p <= 0) return;
+    const keep = ctx.getImageData ? null : null;
+    const snap = document.createElement('canvas'); snap.width = W; snap.height = H; snap.getContext('2d').drawImage(cv, 0, 0);
+    fn();
+    const cur = document.createElement('canvas'); cur.width = W; cur.height = H; const cc = cur.getContext('2d'); cc.drawImage(cv, 0, 0);
+    ctx.drawImage(snap, 0, 0);
+    cc.globalCompositeOperation = 'destination-in'; cc.drawImage(inkMask(p, dir), 0, 0, W, H); ctx.drawImage(cur, 0, 0);
+  };
+  if (st && tb < 10) reveal(() => drawStripScene(st, t), (t - SEC) / .7, { x: .5, y: .76, k: .5 });
+  // 楼：仰摇（第 10–12 小节）
+  if (tb >= 9.9 && tb < 12.6) reveal(() => {
+    const k = easeInOut((tb - 10.1) / 1.7);
+    insert('G_tower', { x: .5, y: lerp(.93, .2, k), z: lerp(1.7, 1.1, k) });
+    drawMist(t, .7, .3); drawMist(t * 1.3, .5, .12);
+  }, (tb - 9.9) / .25, { x: .5, y: 1, k: .55 });
+  if (st && tb >= 12 && tb < 17.2) reveal(() => drawStripScene(st, t), (tb - 12) / .22, { x: .5, y: .1, k: .6 });
+  // 路边：坐下（16.85 起），停在 18，19 重新上路
+  if (tb >= 16.85 && tb < 19.3) reveal(() => {
+    const tf = Math.min(t, T_STOP), k = easeInOut((bars(tf) - 16.85) / 1.3);
+    const drain = t < T_STOP ? 0 : t < T_RESUME ? ease((t - T_STOP) / 1.2) : 0;
+    insert('J_rest', { x: lerp(.5, .6, k), y: lerp(.5, .62, k), z: lerp(1.05, 1.25, k) }, { gray: drain });
+    drawRain(tf, 1, .22);
+    if (t >= T_STOP && t < T_RESUME) vignette(.2 * ease((t - T_STOP) / .4));
+  }, (tb - 16.85) / .2, { x: .6, y: .7, k: .4 });
+  if (st && tb >= 19) reveal(() => drawStripScene(st, t), (tb - 19) / .12, { x: .5, y: .5, k: .3 });
+  // 长路：没入雾里（20.4 起）
+  if (tb >= 20.4 && tb < 21.6) reveal(() => {
+    const k = easeInOut((tb - 20.4) / 1.2);
+    insert('K_road', { x: .5, y: lerp(.62, .66, k), z: lerp(1.0, 1.45, k) }); drawMist(t, .8, .5);
+  }, (tb - 20.4) / .25, { x: .5, y: .8, k: .5 });
+  if (sh.scroll) {
+    const k = ease((t - sh.t0) / .9);
+    ctx.save(); ctx.globalAlpha = k; drawScene('P_paper', { x: .5, y: .5, z: 1 }, 1, { filter: 'brightness(1.06) contrast(0.92)' }); ctx.restore();
+    scroll(t, sh.t0 + .35);
+  }
+  for (const it of (sh.text || [])) textItem(it, sh, t);
+  vignette(.14);
+  const end = ease((t - (TOTAL - .6)) / .6);
+  if (end > 0) { ctx.fillStyle = `rgba(8,7,6,${end})`; ctx.fillRect(0, 0, W, H); }
+}
+
+window.renderFrame = async i => { await draw(i / FPS); };
+window.renderAt = async t => { await draw(t); };
+(async () => {
+  ED = await (await fetch('edit.json')).json();
+  FPS = ED.fps; SEC = 60 / ED.bpm * 4; BAR = SEC;
+  let t = ED.titleBars * SEC, prev = null;
+  for (const sh of ED.shots) {
+    const s = Object.assign({}, sh, { t0: t, t1: t + sh.bars * SEC, prev });
+    if (prev) prev.next = s; if (s.text && s.text.some(x => x.carry)) s.carries = true;
+    SHOTS.push(s); prev = s; t = s.t1;
+    if (s.stop) { T_STOP = s.t0; T_RESUME = s.t1; }
+    if (s.scroll) { T_SCROLL = s.t0; T_DING = s.t0 + 4.2; }
+  }
+  TOTAL = t; TOTAL_FRAMES = Math.round(TOTAL * FPS);
+  Object.assign(window, { TOTAL_FRAMES, FPS_OUT: FPS });
+  makeNoise(); buildA(); layout();
+  RIG = await (await fetch('art3/png/rig.json')).json();
+  await Promise.all(['P1_city', 'P2_rain', 'P3_snow', 'P4_market', 'P6_bbq', 'P7_moon'].map(async n => IMG[n] = await loadImg(`art3/jpg/${n}.jpg`)));
+  IMG.S1_ride = await loadImg('art3/png/S1_ride.png');
+  for (const n of ['P_paper', 'G_tower', 'J_rest', 'K_road', 'drop']) IMG[n] = await loadImg(`art/jpg/${n}.jpg`);
+  IMG.rider = await loadImg('art/jpg/rider.png');
+  // 白天城市山水里楼体暗部的取样点 → 夜里的窗
+  { const im = IMG.P1_city, c = document.createElement('canvas'); c.width = 633; c.height = 269; const g = c.getContext('2d'); g.drawImage(im, 0, 0, 633, 269);
+    const d = g.getImageData(0, 0, 633, 269).data, r = rand(9);
+    for (let i = 0; i < 6000 && WINDOWS.length < 520; i++) { const x = (r() * 633) | 0, y = (r() * 269 * .66) | 0, p = (y * 633 + x) * 4, l = (d[p] + d[p + 1] + d[p + 2]) / 765;
+      if (l < .42) WINDOWS.push({ u: x / 633, v: y / 269, a: .5 + r() * .5, f: 1 + r() * 4, ph: r() * 6.28 }); } }
+  buildRider();
+  await Promise.all(['WenKai', 'WenKaiM', 'MaShan'].map(f => document.fonts.load(`40px ${f}`, '山坡羊外卖骑手停活')));
+  document.body.classList.add('render'); window.__ready = true; await draw(0);
+})();
+</script>
+</body>
+</html>

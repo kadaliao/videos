@@ -26,12 +26,12 @@ if (a.includes('--cover')) {
   const p = await open(); writeFileSync(join(ROOT, 'out/cover.png'), Buffer.from(await grab(p, 'renderCover', 0, 'png'), 'base64')); console.log('out/cover.png');
 } else if (opt('--stills')) {
   const p = await open();
-  for (const s of opt('--stills').split(',')) writeFileSync(join(ROOT, `build/stills/t${(+s).toFixed(2)}.jpg`), Buffer.from(await grab(p, 'renderAt', +s), 'base64'));
+  for (const s of opt('--stills').split(',')) writeFileSync(join(ROOT, `${opt('--stilldir', 'build/stills')}/t${(+s).toFixed(2).padStart(6, '0')}.jpg`), Buffer.from(await grab(p, 'renderAt', +s), 'base64'));
   console.log('stills ok');
 } else {
   const p0 = await open(); writeFileSync(join(ROOT, 'build/cues.json'), JSON.stringify(await p0.evaluate(() => window.CUES || null))); const total = await p0.evaluate(() => window.TOTAL_FRAMES); const fps = await p0.evaluate(() => window.FPS_OUT); await p0.close();
   const f0 = Math.round(+opt('--from', 0) * fps), f1 = Math.min(total, Math.round(+opt('--to', 1e9) * fps));
-  const dir = join(ROOT, PAGE === 'index.html' ? 'build/frames' : 'build/frames2'); mkdirSync(dir, { recursive: true });
+  const dir = join(ROOT, PAGE === 'index.html' ? 'build/frames' : PAGE === 'film.html' ? 'build/frames2' : 'build/frames3'); mkdirSync(dir, { recursive: true });
   for (const f of readdirSync(dir)) unlinkSync(join(dir, f));
   const workers = +opt('--workers', 4); let done = 0; const t0 = Date.now();
   await Promise.all(Array.from({ length: workers }, async (_, k) => {
