@@ -35,11 +35,11 @@
     const s = Math.pow(5, z), pad = lerp(7, 0, z), rad = lerp(22, 0, z);
     ctx.save(); ctx.scale(s, s);
     for (let k = 0; k < 25; k++) {
-      const n = k + 1, i = k % 5, j = Math.floor(k / 5), d = (i + j) * .045, kk = seg(t, d, d + .5);
+      const n = k + 1, i = k % 5, j = Math.floor(k / 5), d = (i + j) * .03, kk = seg(t, d - .2, d + .3);
       if (kk <= 0) continue;
       const sc = n === 1 ? 1 : E.outBack(kk, 1.6), cx = (i + .5) * TW, cy = (j + .5) * TH, w = (TW - pad * 2) * sc, h = (TH - pad * 2) * sc;
       const tt = n === 1 ? lerp(tileTime(1, t), t - 4, smooth(2.4, 3.9, t)) : tileTime(n, t);
-      if (s > 1.02 && n !== 1 && (i > 1 || j > 1)) continue;  // 推进时远处的格子已经出画
+      if (i * TW >= W / s || j * TH >= H / s) continue;  // 推进时已经出画的格子不画
       tile(ctx, drawScene, n, tt, cx - w / 2, cy - h / 2, w, h, rad, n === 1 ? clamp(kk * 3) : 1);
     }
     ctx.restore();
@@ -101,9 +101,9 @@
     const fade = E.in2(seg(t, 10.8, 12));
     ctx.save(); ctx.translate(W, H); ctx.scale(s, s); ctx.translate(-W, -H);
     for (let k = 24; k >= 0; k--) {
-      const n = k + 1, i = k % 5, j = Math.floor(k / 5), dist = (4 - i) + (4 - j), d = .9 + dist * .07, kk = n === 25 ? 1 : seg(t, d, d + .55);
+      const n = k + 1, i = k % 5, j = Math.floor(k / 5), dist = (4 - i) + (4 - j), d = .15 + dist * .085, kk = n === 25 ? 1 : seg(t, d, d + .5);
       if (kk <= 0) continue;
-      if (s > 1.05 && n !== 25 && (i < 3 || j < 3)) continue;
+      if ((i + 1) * TW <= W - W / s || (j + 1) * TH <= H - H / s) continue;  // 还在画外的格子不画
       const cx = (i + .5) * TW, cy = (j + .5) * TH, flip = n === 25 ? 1 : Math.abs(Math.sin(E.outBack(kk, 1.2) * Math.PI / 2));
       const w = (TW - pad * 2) * flip, h = TH - pad * 2;
       // 依次高亮

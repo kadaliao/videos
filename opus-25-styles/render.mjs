@@ -52,19 +52,23 @@ if (opt('--scene')) {
 } else {
   const p0 = await open(); const fps = await p0.evaluate(() => window.FPS_OUT), total = await p0.evaluate(() => window.TOTAL_FRAMES); await p0.close();
   const f0 = Math.round(+opt('--from', 0) * fps), f1 = Math.min(total, Math.round(+opt('--to', 1e9) * fps));
-  const dir = join(ROOT, 'build/frames'); mkdirSync(dir, { recursive: true }); for (const f of readdirSync(dir)) unlinkSync(join(dir, f));
+  // 帧按全片绝对序号命名；只渲染一段（--from/--to）时保留其余帧，方便局部重渲后再整体编码
+  const dir = join(ROOT, 'build/frames'); mkdirSync(dir, { recursive: true }); if (f0 === 0 && f1 === total) for (const f of readdirSync(dir)) unlinkSync(join(dir, f));
   const workers = +opt('--workers', 4); let done = 0; const t0 = Date.now();
   await Promise.all(Array.from({ length: workers }, async (_, k) => {
     const p = await open();
     for (let i = f0 + k; i < f1; i += workers) {
-      save(join(dir, `${String(i - f0).padStart(5, '0')}.jpg`), await grab(p, 'renderFrame', i));
+      save(join(dir, `${String(i).padStart(5, '0')}.jpg`), await grab(p, 'renderFrame', i));
       if (++done % 150 === 0) console.log(`${done}/${f1 - f0} ${(done / ((Date.now() - t0) / 1000)).toFixed(1)} fps`);
     }
   }));
   console.log(`rendered ${f1 - f0} frames in ${((Date.now() - t0) / 1000).toFixed(0)}s`);
   const OUTV = opt('--out', 'build/video.mp4'); mkdirSync(dirname(join(ROOT, OUTV)), { recursive: true });
-  execFileSync('ffmpeg', ['-v', 'error', '-y', '-framerate', String(fps), '-i', join(dir, '%05d.jpg'), '-vf', 'scale=in_range=full:out_range=tv:in_color_matrix=bt601:out_color_matrix=bt709,format=yuv420p',
-    '-c:v', 'libx264', '-preset', 'slow', '-crf', '17', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-movflags', '+faststart', join(ROOT, OUTV)], { stdio: 'inherit' });
+  // 两遍编码，6 Mbps：成片控制在 GitHub 单文件 100 MB 以内
+  const enc = pass => ['-v', 'error', '-y', '-framerate', String(fps), '-i', join(dir, '%05d.jpg'), '-vf', 'scale=in_range=full:out_range=tv:in_color_matrix=bt601:out_color_matrix=bt709,format=yuv420p',
+    '-c:v', 'libx264', '-preset', 'slow', '-b:v', '6000k', '-maxrate', '9000k', '-bufsize', '12000k', '-pass', String(pass), '-passlogfile', join(ROOT, 'build/x264')];
+  execFileSync('ffmpeg', [...enc(1), '-an', '-f', 'null', '-'], { stdio: 'inherit' });
+  execFileSync('ffmpeg', [...enc(2), '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-movflags', '+faststart', join(ROOT, OUTV)], { stdio: 'inherit' });
   console.log(OUTV);
 }
 if (errors.length) console.error(`${errors.length} page errors`);
