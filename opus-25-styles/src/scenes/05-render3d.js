@@ -28,7 +28,7 @@
   // ---------- 着色器 ----------
   const FS = `#version 300 es
 precision highp float;
-__DEFS__
+
 out vec4 fragColor;
 uniform vec2 uR;
 uniform float uT;
@@ -112,9 +112,6 @@ void main(){
   gR0 = mat2(c0, -s0, s0, c0); gR1 = mat2(c1, -s1, s1, c1);
   gK0 = min(gS0.x, gS0.y); gK1 = min(gS1.x, gS1.y); gK2 = min(gS2.x, gS2.y);
   gFR = uFieldRect; gBB = uBeadB;
-#ifdef D_TRIV
-  fragColor = vec4(1.); return;
-#endif
   vec2 fc = vec2(gl_FragCoord.x, uR.y - gl_FragCoord.y);   // 上下翻转，readPixels 后即为正向
   vec2 uv = (fc - 0.5 * uR) / uR.y * 2.;
   vec3 ro = uCam;
@@ -123,7 +120,6 @@ void main(){
   vec3 bg = sky(rd), col = bg;
   float t = 1e9, mat = -1., tmax = 16.; vec2 cid = vec2(0.);
   // 1) 珠田：逐行（z 方向）解析求交
-#ifndef D_NOBEADS
   if (rd.y < 0.) {
     float ta = max(0., (ro.y - 0.18) / -rd.y), tb = min(tmax, (ro.y + 0.12) / -rd.y);
     if (ta < tmax) {
@@ -147,7 +143,6 @@ void main(){
       if (mat < 0.) { float tg = (ro.y - 0.0) / -rd.y; if (tg < tmax) { t = tg; mat = 4.; } }
     }
   }
-#endif
   // 2) 飞溅小珠
   if (gBB.w > 0.) for (int i = 0; i < 18; i++) { vec4 bb = beadAt(i); float th = sphHit(ro, rd, bb.xyz, bb.w); if (th < t) { t = th; mat = 5.; } }
   // 3) 主体：球体追踪（全着色器只保留一处 obj3 的追踪调用，另一处在下面的统一采样循环里）
@@ -155,9 +150,6 @@ void main(){
     float to = 0., dm;
     if (ro.y > uTop) to = rd.y >= 0. ? 1e9 : (ro.y - uTop) / -rd.y;
     float lim = min(t, tmax);
-#ifdef D_NOOBJ
-    lim = -1.;
-#endif
     for (int i = 0; i < 64; i++) {
       if (to > lim) break;
       float d = obj3(ro + rd * to, dm);
@@ -165,12 +157,7 @@ void main(){
       to += d;
     }
   }
-#ifdef D_NOSHADE
-  if (mat >= 0.) col = vec3(mat * 0.1);
-  if (false) {
-#else
   if (mat >= 0.) {
-#endif
     vec3 p = ro + rd * t;
     vec3 n = vec3(0., 1., 0.);
     bool isObj = mat < 4.;
@@ -257,7 +244,7 @@ void main(){
     const pr = gl.createProgram();
     gl.attachShader(pr, sh(gl.VERTEX_SHADER, `#version 300 es
 void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(p * 2. - 1., 0., 1.); }`));
-    gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, FS.replace('__DEFS__', ((window.__flags || '').match(/D_\w+/g) || []).map(d => '#define ' + d).join('\n')))); gl.linkProgram(pr);
+    gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, FS)); gl.linkProgram(pr);
     if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error('s05 link: ' + gl.getProgramInfoLog(pr));
     const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
@@ -343,7 +330,7 @@ void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)
     gl.uniform2f(U.uR, GW, GH); gl.uniform1f(U.uT, t);
     // 镜头：一镜到底的缓慢推近 + 环绕
     const k = S.E.inOut2(S.seg(t, -0.6, 4.6));
-    const ang = S.lerp(0.5, 0.02, k), dist = S.lerp(7.1, 5.9, k), hgt = S.lerp(3.2, 2.6, k);
+    const ang = S.lerp(0.5, 0.16, k), dist = S.lerp(7.1, 5.9, k), hgt = S.lerp(3.2, 2.6, k);
     gl.uniform3f(U.uCam, Math.sin(ang) * dist, hgt, Math.cos(ang) * dist - 0.2);
     gl.uniform3f(U.uTgt, 0.0, 0.1, -0.15);
     const P = [], Sc = [];

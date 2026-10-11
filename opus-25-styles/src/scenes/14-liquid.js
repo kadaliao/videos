@@ -13,12 +13,13 @@ uniform float uT;
 uniform sampler2D uData;   // 每个图元一个纹素
 uniform sampler2D uText;   // 标题高度图（a）+ 颜色（rgb）
 
-const vec3 C_OR = vec3(1.0, 0.42, 0.08);
+const vec3 C_OR = vec3(1.0, 0.52, 0.06);
 const vec3 C_MG = vec3(1.0, 0.08, 0.52);
 const vec3 C_VI = vec3(0.52, 0.16, 1.0);
 const float F = 2.5;
 
 // 图元（从纹理拷到全局变量，避免内联函数里反复取 uniform）
+float gT;
 vec4 gA, gAs, gB, gBs, gD, gDs, gC, gCp, gS1, gS2, gDB;
 
 float smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.) / k; return min(a, b) - h * h * k * 0.25; }
@@ -41,17 +42,17 @@ float map(vec3 p){
       if (b.w > 0.) d = smin(d, length(p - b.xyz) - b.w, 0.1);
     }
   }
-  d = smin(d, length(p - gS1.xyz) - gS1.w, 0.18);
-  d = min(d, length(p - gS2.xyz) - gS2.w);
+  d = smin(d, length(p - gS1.xyz) - gS1.w, 0.26);
+  d = smin(d, length(p - gS2.xyz) - gS2.w, 0.08);
   return d;
 }
 
 // 命中点的颜色：按到各图元的距离加权混合（相邻处颜色交融）
 vec3 colorAt(vec3 p){
-  float wa = exp(-9. * max(sdEll(p, gA, gAs.xyz), 0.));
-  float wb = exp(-9. * max(sdEll(p, gB, gBs.xyz), 0.));
-  float wd = exp(-9. * max(sdEll(p, gD, gDs.xyz), 0.));
-  float ws = exp(-9. * max(min(length(p - gS1.xyz) - gS1.w, length(p - gS2.xyz) - gS2.w), 0.));
+  float wa = exp(-14. * max(sdEll(p, gA, gAs.xyz), 0.));
+  float wb = exp(-14. * max(sdEll(p, gB, gBs.xyz), 0.));
+  float wd = exp(-14. * max(sdEll(p, gD, gDs.xyz), 0.));
+  float ws = exp(-14. * max(min(length(p - gS1.xyz) - gS1.w, length(p - gS2.xyz) - gS2.w), 0.));
   float wc = gCp.z > 0. ? exp(-9. * max(length(p - gC.xyz) - gC.w - 0.1, 0.)) * 0.6 : 0.;
   vec3 c = wa * C_OR + wb * C_MG + wd * C_VI + ws * C_VI + wc * mix(C_OR, C_MG, 0.5);
   return c / (wa + wb + wd + ws + wc + 1e-4);
@@ -65,6 +66,15 @@ vec3 bgAt(vec2 uv){
   c += vec3(0.9, 0.3, 0.6) * 0.10 * smoothstep(0.22, 0.0, length(uv - vec2(-0.42, 0.55)));
   c += vec3(1.0, 0.5, 0.2) * 0.07 * smoothstep(0.16, 0.0, length(uv - vec2(0.45, -0.85)));
   c += vec3(0.5, 0.3, 1.0) * 0.08 * smoothstep(0.3, 0.0, length(uv - vec2(0.5, 0.15)));
+  // 漂浮的失焦小气泡
+  for (int i = 0; i < 7; i++) {
+    float fi = float(i);
+    vec2 bp = vec2(fract(fi * 0.618 + 0.13) * 1.1 - 0.55, fract(fi * 0.371 + gT * 0.05 + 0.2) * 2.2 - 1.1);
+    float br = 0.025 + 0.03 * fract(fi * 0.53);
+    float dd = length(uv - bp);
+    vec3 bc = i % 3 == 0 ? vec3(1.0, 0.5, 0.2) : i % 3 == 1 ? vec3(1.0, 0.2, 0.6) : vec3(0.6, 0.3, 1.0);
+    c += bc * (0.10 * smoothstep(br, br * 0.6, dd) + 0.08 * smoothstep(br * 0.3, br * 1.05, dd) * smoothstep(br * 1.1, br * 0.9, dd));
+  }
   return c;
 }
 vec3 bgDir(vec3 d){ return bgAt(d.xy / max(-d.z, 0.05) * F * 0.95); }
@@ -79,26 +89,29 @@ vec3 env(vec3 r){
 vec3 jelly(vec3 n, vec3 rd, vec3 c, vec2 uv, float thick){
   float ndv = clamp(dot(n, -rd), 0., 1.);
   float fre = pow(1. - ndv, 3.);
-  vec3 rr = refract(rd, n, 0.75);
-  vec3 trans = bgDir(rr + rd * 0.2) * 2.2 + 0.08;
-  vec3 absorb = pow(c, vec3(0.6 + 1.6 * thick));
-  vec3 col = trans * absorb + c * (0.30 + 0.35 * thick) * (0.6 + 0.4 * n.y);
+  vec3 rr = refract(rd, n, 0.72);
+  vec3 trans = bgDir(rr) * 2.6 + 0.04;
+  // 越厚越深、越饱和；边缘透出背景
+  vec3 absorb = pow(c, vec3(0.45 + 2.2 * thick));
+  vec3 col = trans * absorb * 1.3 + c * c * (0.10 + 0.22 * (1. - thick));
+  // 内部焦散：背光一侧（下方）透出的亮色
+  col += mix(c, vec3(1.0, 0.8, 0.5), 0.25) * smoothstep(-0.1, 0.9, -n.y * 0.8 + n.x * 0.3) * (0.55 - 0.3 * ndv);
   // 次表面：边缘透亮
-  col += c * pow(1. - ndv, 1.6) * 0.55;
+  col += c * pow(1. - ndv, 1.8) * 0.5;
   // 边缘光
-  col += mix(vec3(1.0, 0.55, 0.9), vec3(0.6, 0.5, 1.0), 0.5 + 0.5 * n.x) * smoothstep(0.55, 1., 1. - ndv) * 0.55;
+  col += mix(vec3(1.0, 0.55, 0.9), vec3(0.6, 0.5, 1.0), 0.5 + 0.5 * n.x) * smoothstep(0.6, 1., 1. - ndv) * 0.5;
   vec3 r = reflect(rd, n);
-  col += env(r) * (0.15 + 0.85 * fre);
+  col += env(r) * (0.12 + 0.8 * fre);
   // 锐利的白色高光
-  col += vec3(1.) * pow(clamp(dot(r, normalize(vec3(-0.45, 0.75, 0.6))), 0., 1.), 140.) * 2.4;
-  col += vec3(1.) * pow(clamp(dot(r, normalize(vec3(0.6, 0.35, 0.75))), 0., 1.), 260.) * 1.3;
+  col += vec3(1.) * pow(clamp(dot(r, normalize(vec3(-0.45, 0.75, 0.6))), 0., 1.), 160.) * 2.6;
+  col += vec3(1.) * pow(clamp(dot(r, normalize(vec3(0.6, 0.35, 0.75))), 0., 1.), 300.) * 1.4;
   return col;
 }
 
 void main(){
   vec2 fc = vec2(gl_FragCoord.x, uR.y - gl_FragCoord.y);
   vec2 uv = (fc - 0.5 * uR) / uR.y * 2.;
-  uv.y = -uv.y;
+  gT = uT;
   gA = texelFetch(uData, ivec2(0, 0), 0); gAs = texelFetch(uData, ivec2(1, 0), 0);
   gB = texelFetch(uData, ivec2(2, 0), 0); gBs = texelFetch(uData, ivec2(3, 0), 0);
   gD = texelFetch(uData, ivec2(4, 0), 0); gDs = texelFetch(uData, ivec2(5, 0), 0);
@@ -107,7 +120,7 @@ void main(){
 
   vec3 col = bgAt(uv);
   // ---- 标题果冻（高度图）----
-  ivec2 ip = ivec2(fc);
+  ivec2 ip = ivec2(gl_FragCoord.xy);   // 渲染行 0 = 画面顶部 = 文字纹理行 0
   vec4 tx = texelFetch(uText, ip, 0);
   bool done = false;
   if (tx.a > 0.02) {
@@ -117,25 +130,33 @@ void main(){
     vec3 c = tx.rgb / max(tx.a, 1e-3);
     vec3 jc = jelly(n, vec3(0., 0., -1.), c, uv, smoothstep(0.2, 1., tx.a));
     // 软边：阴影 + 渐入
-    col *= 1. - 0.35 * smoothstep(0.0, 0.3, texelFetch(uText, ip - ivec2(6, -10), 0).a);
+    col *= 1. - 0.35 * smoothstep(0.0, 0.3, texelFetch(uText, ip - ivec2(5, 8), 0).a);
     col = mix(col, jc, smoothstep(0.08, 0.38, tx.a));
   } else {
-    col *= 1. - 0.35 * smoothstep(0.0, 0.3, texelFetch(uText, ip - ivec2(6, -10), 0).a);
+    col *= 1. - 0.35 * smoothstep(0.0, 0.3, texelFetch(uText, ip - ivec2(5, 8), 0).a);
   }
   // ---- 元球 ----
-  vec3 ro = vec3(0., 0., 5.);
-  vec3 rd = normalize(vec3(uv, -F));
-  float t = 3.2;
-  float hit = -1.;
-  if (abs(uv.y + 0.25) < 0.58 || gD.y > 0.3) {
-    for (int i = 0; i < 72; i++) {
-      float d = map(ro + rd * t);
-      if (d < 0.0015) { hit = t; break; }
-      t += d * 0.9;
-      if (t > 7.) break;
-    }
+  vec3 ro = vec3(0., 1.35, 5.);
+  vec3 fw = normalize(vec3(0., 0.04, 0.) - ro), rt = normalize(cross(fw, vec3(0., 1., 0.))), up = cross(rt, fw);
+  vec3 rd = normalize(fw * F + uv.x * rt + uv.y * up);
+  // 包围球：射线不经过就跳过
+  vec3 oc = ro - vec3(0., -0.3, 0.);
+  float bb = dot(oc, rd), bc = dot(oc, oc) - 1.45 * 1.45, bh = bb * bb - bc;
+  float t = bh > 0. ? max(0., -bb - sqrt(bh)) : 1e9;
+  float tEnd = bh > 0. ? -bb + sqrt(bh) : -1.;
+  float hit = -1., md = 1e9, mt = 0.;
+  float pix = 2.6 / uR.y / F;   // 每像素对应的角度
+  for (int i = 0; i < 72; i++) {
+    if (t > tEnd) break;
+    float d = map(ro + rd * t);
+    if (d / t < md) { md = d / t; mt = t; }
+    if (d < 0.0015) { hit = t; break; }
+    t += d * 0.9;
   }
-  if (hit > 0.) {
+  // 边缘抗锯齿：未命中但贴近表面的像素按覆盖率混合
+  float cover = hit > 0. ? 1. : 1. - smoothstep(0., pix, md);
+  if (cover > 0.) {
+    if (hit < 0.) t = mt;
     vec3 p = ro + rd * t;
     vec3 n = vec3(0.);
     for (int i = 0; i < 5; i++) {
@@ -147,12 +168,11 @@ void main(){
     }
     n = normalize(n);
     vec3 c = colorAt(p);
-    vec3 jc = jelly(n, rd, c, uv, t);
-    col = jc;
+    col = mix(col, jelly(n, rd, c, uv, t), cover);
   } else {
     // 液体下方的柔和反光
-    vec2 q = uv - vec2(0., -1.05);
-    col += vec3(0.6, 0.15, 0.4) * 0.18 * exp(-dot(q * vec2(1.2, 5.), q * vec2(1.2, 5.)));
+    vec2 q = uv - vec2(0., -0.72);
+    col += vec3(0.6, 0.15, 0.4) * 0.16 * exp(-dot(q * vec2(1.2, 5.), q * vec2(1.2, 5.)));
   }
   // 暗角
   vec2 v = fc / uR - 0.5;
@@ -195,7 +215,7 @@ void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)
     // 漂移靠拢 → 0.5 拍点融合 → 弹性收拢
     const app = E.inOut2(seg(t, -0.6, 0.55));
     const settle = t > 0.55 ? 1 - Math.exp(-(t - 0.55) * 5) * Math.cos((t - 0.55) * 16) : 0;
-    let ax = lerp(-0.92, -0.4, app), bx = lerp(0.9, 0.38, app);
+    let ax = lerp(-0.8, -0.4, app), bx = lerp(0.8, 0.38, app);
     ax = lerp(ax, -0.27, settle); bx = lerp(bx, 0.25, settle);
     const floatY = Math.sin(t * 2.2) * 0.03;
     // 撞击后的整体晃动
@@ -205,33 +225,42 @@ void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)
     // 融合时的挤压
     const fuse = t > 0.45 ? Math.exp(-(t - 0.45) * 4) * Math.sin((t - 0.45) * 14) : 0;
     set(0, ax, -0.52 + floatY, 0, 0.44);
-    set(1, 1 - fuse * 0.08 + wob * 0.06, 1 + fuse * 0.1 - wob * 0.1, 1, neck);
+    const br1 = 0.025 * Math.sin(t * 4.4), br2 = 0.025 * Math.sin(t * 4.4 + 1.9);
+    set(1, 1 - fuse * 0.08 + wob * 0.06 - br1, 1 + fuse * 0.1 - wob * 0.1 + br1, 1, neck);
     set(2, bx, -0.44 - floatY, 0.05, 0.39);
-    set(3, 1 - fuse * 0.08 + wob * 0.06, 1 + fuse * 0.12 - wob * 0.12, 1, 0);
+    set(3, 1 - fuse * 0.08 + wob * 0.06 - br2, 1 + fuse * 0.12 - wob * 0.12 + br2, 1, 0);
     // 液滴：从融合体顶部拉出（1.0–1.55），断开上升，回落（2.0 撞击）
     let dy, dr = 0.17, sy = 1, dk = 0.3;
     if (t < 1.0) { dy = -0.45; dr = 0.12 + 0.05 * seg(t, 0.6, 1.0); }
-    else if (t < 1.6) { const k = seg(t, 1.0, 1.6); dy = lerp(-0.4, 0.62, E.out3(k)); sy = 1 + 0.6 * Math.sin(Math.PI * Math.min(1, k * 1.6)); dk = lerp(0.35, 0.18, k); }
-    else if (t < 2.0) { const k = seg(t, 1.6, 2.0); dy = lerp(0.62, -0.06, E.in2(k)); sy = 1 + 0.35 * k; dk = 0.18; }
-    else { const k = seg(t, 2.0, 2.35); dy = lerp(-0.06, -0.35, E.out2(k)); dr = 0.17 * (1 - 0.6 * k); sy = 1 - 0.3 * Math.exp(-imp * 6); dk = 0.3; }
+    else if (t < 1.6) { const k = seg(t, 1.0, 1.6); dy = lerp(-0.4, 0.24, E.out3(k)); sy = 1 + 0.6 * Math.sin(Math.PI * Math.min(1, k * 1.6)); dk = lerp(0.35, 0.18, k); }
+    else if (t < 2.0) { const k = seg(t, 1.6, 2.0); dy = lerp(0.24, -0.1, E.in2(k)); sy = 1 + 0.35 * k; dk = 0.18; }
+    else { const k = seg(t, 2.0, 2.35); dy = lerp(-0.1, -0.35, E.out2(k)); dr = 0.17 * (1 - 0.6 * k); sy = 1 - 0.3 * Math.exp(-imp * 6); dk = 0.3; }
     if (t > 1.55 && t < 1.62) dk = 0.18;
     set(4, 0.0, dy, 0.08, dr);
     set(5, 1 / Math.sqrt(sy), sy, 1 / Math.sqrt(sy), dk);
     // 皇冠水花（2.0 撞击后升起再塌下）
     const ck = seg(t, 2.0, 2.9);
     const crownOn = t > 2.0 && t < 2.9 ? 1 : 0;
-    const top = -0.06 + 0.02 * Math.sin(t * 2.2);
+    const top = -0.12 + 0.02 * Math.sin(t * 2.2);
     set(6, 0, top + 0.12 * Math.sin(Math.PI * Math.min(1, ck * 1.3)), 0.06, 0.08 + 0.3 * E.out3(ck));
     set(7, 0.045 * (1 - ck), 0.07 * Math.sin(Math.PI * Math.min(1, ck * 1.5)), crownOn, 0);
     // 卫星小球（紫）缓慢环绕
     const a1 = t * 0.9 + 0.6, a2 = t * 0.9 + 3.6;
-    set(8, Math.cos(a1) * 0.78, -0.35 + Math.sin(a1) * 0.12 + 0.28, Math.sin(a1) * 0.4, 0.12 + 0.015 * S.pulse(t, 7));
-    set(9, Math.cos(a2) * 0.86, -0.75 + Math.sin(a2 * 1.3) * 0.1, Math.sin(a2) * 0.4, 0.075);
+    // 紫色小团：先在左侧漂浮，2.4 起从下方绕到右下，3.0 拍点并入主体
+    {
+      const k = E.inOut2(seg(t, 2.4, 3.0));
+      const x0 = Math.cos(a1) * 0.7, y0 = -0.1 + Math.sin(a1) * 0.1, z0 = Math.sin(a1) * 0.3;
+      const x1 = 0.5, y1 = -0.78, z1 = 0.15;
+      const bx2 = S.lerp(S.lerp(x0, 0.0, k), S.lerp(0.0, x1, k), k), by2 = S.lerp(S.lerp(y0, -1.05, k), S.lerp(-1.05, y1, k), k);
+      const after = t - 3.0, jig = after > 0 ? Math.exp(-after * 4) * Math.sin(after * 18) * 0.04 : 0;
+      set(8, bx2, by2 + jig, S.lerp(z0, z1, k), 0.13 + 0.07 * k + 0.012 * S.pulse(t, 7));
+    }
+    set(9, 0.72 + Math.cos(a2) * 0.08, 0.12 + Math.sin(a2 * 1.3) * 0.1, 0.1 + Math.sin(a2) * 0.2, 0.07 + 0.01 * Math.sin(t * 6));
     // 飞溅小液滴：从皇冠边缘抛出，落回并融合
     let cx = 0, cy = 0, cz = 0, n = 0;
     const drops = [];
     for (let i = 0; i < ND; i++) {
-      const r = S.rng(1400 + i), ang = (i + 0.3 * r()) / ND * S.TAU, v = 0.55 + r() * 0.5, vy = 1.6 + r() * 0.9, dt = t - 2.05;
+      const r = S.rng(1400 + i), ang = (i + 0.3 * r()) / ND * S.TAU, v = 0.6 + r() * 0.5, vy = 1.0 + r() * 0.7, dt = t - 2.05;
       if (dt <= 0 || dt > 1.25) { set(12 + i, 0, -9, 0, 0); continue; }
       const R0 = 0.2 + v * dt, y = top + 0.05 + vy * dt - 0.5 * 4.2 * dt * dt;
       const x = Math.cos(ang) * R0, z = Math.sin(ang) * R0 * 0.6 + 0.06;
@@ -262,10 +291,10 @@ void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)
     // 14：橙→品红
     const e1 = E.outElastic(seg(tt, -0.4, 0.5));
     ga.save(); ga.translate(46 + 70, 236); ga.scale(e1, 2 - e1 + wob * 0.004); ga.translate(-70, 0);
-    const g1 = ga.createLinearGradient(0, -130, 0, 0); g1.addColorStop(0, '#ffb04a'); g1.addColorStop(1, '#ff3d7a');
-    ga.fillStyle = g1; ga.font = S.F(150, 'ZCOOLQingKe'); ga.fillText('14', 0, 0); ga.restore();
+    const g1 = ga.createLinearGradient(0, -110, 0, 0); g1.addColorStop(0, '#ffc04a'); g1.addColorStop(0.5, '#ff7a3a'); g1.addColorStop(1, '#ff2f7a');
+    ga.fillStyle = g1; ga.font = S.F(122, 'RubikMonoOne'); ga.fillText('14', 0, 0); ga.restore();
     // 液态流动：逐字弹入
-    ga.font = S.F(108, 'ZCOOLQingKe');
+    ga.font = S.F(100, 'ZCOOLQingKe');
     const cs = S.chars(ga, '液态流动', 44, 'left', 4);
     cs.forEach((c, i) => {
       const e = E.outElastic(seg(tt, -0.25 + i * 0.09, 0.75 + i * 0.09));
