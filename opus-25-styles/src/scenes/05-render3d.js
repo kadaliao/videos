@@ -36,12 +36,13 @@ uniform float uTop;
 uniform vec3 uCam, uTgt;
 uniform vec4 uObjP[3];   // xyz 位置, w 偏航角
 uniform vec4 uObjS[3];   // xyz 缩放, w 倾斜
-uniform vec4 uBead[18];  // 飞溅小珠 xyz, r
 uniform vec4 uBeadB;     // 飞溅小珠包围球
 uniform sampler2D uField;
 uniform vec4 uFieldRect; // i0 j0 w h
 
 const float BR = 0.045, SX = 0.106, SZ = 0.0918;
+// SwiftShader 下，内联函数里直接引用 uniform 会让每个像素的开销暴涨；先拷到全局标量变量里
+vec3 gP0, gP1, gP2, gS0, gS1, gS2; mat2 gR0, gR1; vec4 gFR, gBB; float gK0, gK1, gK2;
 const vec3 HERO = vec3(1.0, 0.40, 0.15);
 const vec3 PINK = vec3(0.98, 0.70, 0.82);
 const vec3 SKYT = vec3(0.80, 0.76, 0.98);
@@ -51,28 +52,24 @@ const vec3 LDIR = vec3(-0.5263, 0.8134, -0.2871);
 float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 
 vec4 cellAt(vec2 cid){
-  ivec2 q = ivec2(cid) - ivec2(uFieldRect.xy);
-  if (q.x < 0 || q.y < 0 || q.x >= int(uFieldRect.z) || q.y >= int(uFieldRect.w)) return vec4(0.);
+  ivec2 q = ivec2(cid) - ivec2(gFR.xy);
+  if (q.x < 0 || q.y < 0 || q.x >= int(gFR.z) || q.y >= int(gFR.w)) return vec4(0.);
   return texelFetch(uField, q, 0);
 }
 
 // 三个主体（不含飞溅小珠），mat: 1 橙方块 2 甜甜圈 3 铬球
 float obj3(vec3 p, out float mat){
-  float c, s;
   // 0 圆角方块
-  vec3 q = p - uObjP[0].xyz; c = cos(uObjP[0].w); s = sin(uObjP[0].w); q.xz = mat2(c, -s, s, c) * q.xz;
-  vec3 sc = uObjS[0].xyz;
-  vec3 b = abs(q / sc) - 0.24;
-  float d = (length(max(b, 0.)) + min(max(b.x, max(b.y, b.z)), 0.) - 0.26) * min(sc.x, sc.y);
+  vec3 q = p - gP0; q.xz = gR0 * q.xz;
+  vec3 b = abs(q / gS0) - 0.24;
+  float d = (length(max(b, 0.)) + min(max(b.x, max(b.y, b.z)), 0.) - 0.26) * gK0;
   mat = 1.;
   // 1 甜甜圈
-  q = p - uObjP[1].xyz; c = cos(uObjS[1].w); s = sin(uObjS[1].w); q.yz = mat2(c, -s, s, c) * q.yz;
-  sc = uObjS[1].xyz; q /= sc;
-  float d2 = (length(vec2(length(q.xz) - 0.33, q.y)) - 0.165) * min(sc.x, sc.y);
+  q = p - gP1; q.yz = gR1 * q.yz; q /= gS1;
+  float d2 = (length(vec2(length(q.xz) - 0.33, q.y)) - 0.165) * gK1;
   if (d2 < d) { d = d2; mat = 2.; }
   // 2 铬球
-  q = (p - uObjP[2].xyz) / uObjS[2].xyz;
-  d2 = (length(q) - 0.3) * min(uObjS[2].x, uObjS[2].y);
+  d2 = (length((p - gP2) / gS2) - 0.3) * gK2;
   if (d2 < d) { d = d2; mat = 3.; }
   return d;
 }
@@ -106,7 +103,17 @@ vec3 beadAlbedo(vec2 cid, out float spread){
   return base;
 }
 
+vec4 beadAt(int i){ return texelFetch(uField, ivec2(i, int(gFR.w)), 0); }
+
 void main(){
+  gP0 = uObjP[0].xyz; gP1 = uObjP[1].xyz; gP2 = uObjP[2].xyz; gS0 = uObjS[0].xyz; gS1 = uObjS[1].xyz; gS2 = uObjS[2].xyz;
+  float c0 = cos(uObjP[0].w), s0 = sin(uObjP[0].w), c1 = cos(uObjS[1].w), s1 = sin(uObjS[1].w);
+  gR0 = mat2(c0, -s0, s0, c0); gR1 = mat2(c1, -s1, s1, c1);
+  gK0 = min(gS0.x, gS0.y); gK1 = min(gS1.x, gS1.y); gK2 = min(gS2.x, gS2.y);
+  gFR = uFieldRect; gBB = uBeadB;
+#ifdef D_TRIV
+  fragColor = vec4(1.); return;
+#endif
   vec2 uv = (gl_FragCoord.xy - 0.5 * uR) / uR.y * 2.;
   vec3 ro = uCam;
   vec3 fw = normalize(uTgt - ro), rt = normalize(cross(fw, vec3(0, 1, 0))), up = cross(rt, fw);
@@ -114,6 +121,7 @@ void main(){
   vec3 bg = sky(rd), col = bg;
   float t = 1e9, mat = -1., tmax = 16.; vec2 cid = vec2(0.);
   // 1) 珠田：逐行（z 方向）解析求交
+#ifndef D_NOBEADS
   if (rd.y < 0.) {
     float ta = max(0., (ro.y - 0.21) / -rd.y), tb = min(tmax, (ro.y + 0.12) / -rd.y);
     if (ta < tmax) {
@@ -136,13 +144,17 @@ void main(){
       if (mat < 0.) { float tg = (ro.y - 0.0) / -rd.y; if (tg < tmax) { t = tg; mat = 4.; } }
     }
   }
+#endif
   // 2) 飞溅小珠
-  if (uBeadB.w > 0.) for (int i = 0; i < 18; i++) { float th = sphHit(ro, rd, uBead[i].xyz, uBead[i].w); if (th < t) { t = th; mat = 5.; } }
+  if (gBB.w > 0.) for (int i = 0; i < 18; i++) { vec4 bb = beadAt(i); float th = sphHit(ro, rd, bb.xyz, bb.w); if (th < t) { t = th; mat = 5.; } }
   // 3) 主体：球体追踪（全着色器只保留一处 obj3 的追踪调用，另一处在下面的统一采样循环里）
   {
     float to = 0., dm;
     if (ro.y > uTop) to = rd.y >= 0. ? 1e9 : (ro.y - uTop) / -rd.y;
     float lim = min(t, tmax);
+#ifdef D_NOOBJ
+    lim = -1.;
+#endif
     for (int i = 0; i < 64; i++) {
       if (to > lim) break;
       float d = obj3(ro + rd * to, dm);
@@ -150,14 +162,19 @@ void main(){
       to += d;
     }
   }
+#ifdef D_NOSHADE
+  if (mat >= 0.) col = vec3(mat * 0.1);
+  if (false) {
+#else
   if (mat >= 0.) {
+#endif
     vec3 p = ro + rd * t;
     vec3 n = vec3(0., 1., 0.);
     bool isObj = mat < 4.;
     if (mat == 6.) n = normalize(p - beadPos(cid));
     else if (mat == 5.) {
       float bd = 1e9;
-      for (int i = 0; i < 18; i++) { vec3 v = p - uBead[i].xyz; float dd = length(v) - uBead[i].w; if (dd < bd) { bd = dd; n = normalize(v); } }
+      for (int i = 0; i < 18; i++) { vec4 bb = beadAt(i); vec3 v = p - bb.xyz; float dd = length(v) - bb.w; if (dd < bd) { bd = dd; n = normalize(v); } }
     }
     // 统一采样循环：法线(4) → AO(3) → 软阴影(≤14)
     vec3 nacc = vec3(0.);
@@ -166,7 +183,7 @@ void main(){
     float dNear = obj3(p, dm);
     bool needAO = dNear < 0.5;
     bool needSh = false;
-    for (int k = 0; k < 3; k++) { vec3 oc = p - uObjP[k].xyz; float b = dot(oc, LDIR), c = dot(oc, oc) - 0.81; if (c < 0. || (b < 0. && b * b > c)) needSh = true; }
+    for (int k = 0; k < 3; k++) { vec3 oc = p - (k == 0 ? gP0 : k == 1 ? gP1 : gP2); float b = dot(oc, LDIR), c = dot(oc, oc) - 0.81; if (c < 0. || (b < 0. && b * b > c)) needSh = true; }
     int iEnd = needSh ? 21 : 7;
     int iBeg = isObj ? 0 : needAO ? 4 : 7;
     for (int i = iBeg; i < iEnd; i++) {
@@ -241,9 +258,9 @@ void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)
     const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, TW, TH);
-    const U = {}; for (const n of ['uTop', 'uR', 'uT', 'uCam', 'uTgt', 'uObjP', 'uObjS', 'uBead', 'uBeadB', 'uField', 'uFieldRect']) U[n] = gl.getUniformLocation(pr, n);
-    GL = { c, gl, pr, tex, U, buf: new Float32Array(TW * TH * 4) };
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, TW, TH + 1);
+    const U = {}; for (const n of ['uTop', 'uR', 'uT', 'uCam', 'uTgt', 'uObjP', 'uObjS', 'uBeadB', 'uField', 'uFieldRect']) U[n] = gl.getUniformLocation(pr, n);
+    GL = { c, gl, pr, tex, U, buf: new Float32Array(TW * (TH + 1) * 4) };
   }
 
   // 每帧的物体状态
@@ -314,7 +331,9 @@ void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)
     gl.viewport(0, 0, GW, GH); gl.useProgram(GL.pr);
     // 场贴图
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, GL.tex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TW, TH, gl.RGBA, gl.FLOAT, fieldTexture(t, objs));
+    const _f0 = performance.now(); const fb = fieldTexture(t, objs), sc = scatter(t, objs); if (window.__flags) console.error('s05 field', (performance.now() - _f0).toFixed(1));
+    sc.forEach((v, i) => fb.set(v, (TH * TW + i) * 4));
+    if (!(window.__flags || '').includes('noup') || !GL.up) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TW, TH + 1, gl.RGBA, gl.FLOAT, fb); GL.up = 1;
     gl.uniform1i(U.uField, 0);
     gl.uniform4f(U.uFieldRect, I0, J0, TW, TH);
     gl.uniform2f(U.uR, GW, GH); gl.uniform1f(U.uT, t);
@@ -331,11 +350,11 @@ void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)
     }
     gl.uniform1f(U.uTop, Math.max(...objs.map(o => o.y + 0.75)));
     gl.uniform4fv(U.uObjP, P); gl.uniform4fv(U.uObjS, Sc);
-    const sc = scatter(t, objs); let cx = 0, cy = 0, cz = 0, n = 0;
+    let cx = 0, cy = 0, cz = 0, n = 0;
     for (const s of sc) if (s[3] > 0) { cx += s[0]; cy += s[1]; cz += s[2]; n++; }
     let br = -1;
     if (n) { cx /= n; cy /= n; cz /= n; br = 0; for (const s of sc) if (s[3] > 0) br = Math.max(br, Math.hypot(s[0] - cx, s[1] - cy, s[2] - cz) + s[3]); }
-    gl.uniform4fv(U.uBead, sc.flat()); gl.uniform4f(U.uBeadB, cx, n ? cy : -9, cz, br);
+    gl.uniform4f(U.uBeadB, cx, n ? cy : -9, cz, br);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     return GL.c;
   }
@@ -347,9 +366,10 @@ void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)
     draw(ctx, t, S) {
       const { W, H, E, seg, clamp } = S;
       if (!GL) initGL();
-      const _t0 = performance.now(); const c = renderGL(t); if (window.__flags) { const px = new Uint8Array(4); GL.gl.readPixels(0,0,1,1,GL.gl.RGBA,GL.gl.UNSIGNED_BYTE,px); } const _t1 = performance.now();
-      ctx.save(); ctx.imageSmoothingQuality = 'low'; ctx.drawImage(c, 0, 0, W, H); ctx.restore(); if (window.__flags) { ctx.getImageData(0,0,1,1); console.error('s05 gl', (_t1-_t0).toFixed(0), 'blit', (performance.now()-_t1).toFixed(0)); }
+      const _t0 = performance.now(); const c = (window.__flags || '').includes('noGL') ? GL.c : renderGL(t); if (window.__flags) { const px = new Uint8Array(4); GL.gl.readPixels(0,0,1,1,GL.gl.RGBA,GL.gl.UNSIGNED_BYTE,px); } const _t1 = performance.now();
+      ctx.save(); ctx.imageSmoothingQuality = 'low'; if (!(window.__flags || '').includes('noblit')) ctx.drawImage(c, 0, 0, W, H); ctx.restore(); if (window.__flags) { ctx.getImageData(0,0,1,1); console.error('s05 gl', (_t1-_t0).toFixed(0), 'blit', (performance.now()-_t1).toFixed(0)); }
 
+      if ((window.__flags || '').includes('noTitle')) return;
       // ---------- 标题：干净的产品渲染式排版 ----------
       const a = E.out3(seg(t, -0.3, 0.45)), b = E.out3(seg(t, -0.15, 0.6)), c2 = E.out3(seg(t, 0.0, 0.7));
       ctx.save();

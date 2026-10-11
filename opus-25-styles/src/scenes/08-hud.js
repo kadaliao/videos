@@ -63,7 +63,7 @@
     ctx.lineCap = 'butt'; ctx.lineJoin = 'miter';
 
     // ---------- 背景网格 + 边缘刻度 ----------
-    const gA = flick(-0.25);
+    const gA = flick(-0.3);
     if (gA > 0) {
       ctx.globalAlpha = gA;
       ctx.strokeStyle = rgba(C, 0.06); ctx.lineWidth = 1;
@@ -82,7 +82,7 @@
     }
 
     // ---------- 标题面板 ----------
-    const tA = flick(0.0);
+    const tA = flick(-0.12);
     if (tA > 0) {
       ctx.globalAlpha = tA;
       bracketBox(ctx, 70, 186, 870, 250, 34, CF, 3);
@@ -107,8 +107,8 @@
     }
 
     // ---------- 地球 ----------
-    const gOn = flick(0.12);
-    const pw = E.outBack(clamp((t + 0.1) / 0.5), 1.4);           // 开机缩放
+    const gOn = flick(-0.05);
+    const pw = E.outBack(clamp((t + 0.05) / 0.5), 1.4);           // 开机缩放
     if (gOn > 0) {
       ctx.globalAlpha = gOn;
       const yaw = yawAt(t, S), rad = R * pw;
@@ -426,6 +426,13 @@
     return g;
   }
 
+  let SM = null;
+  function cpuSmall() {
+    if (!SM) { const c = document.createElement('canvas'); c.width = 270; c.height = 480; SM = c.getContext('2d', { willReadFrequently: true }); }
+    SM.setTransform(1, 0, 0, 1, 0, 0); SM.globalAlpha = 1; SM.globalCompositeOperation = 'source-over'; SM.clearRect(0, 0, 270, 480);
+    return SM;
+  }
+
   registerScene({
     n: 8, key: 'hud', zh: '赛博朋克 HUD', en: 'Cyberpunk HUD',
     bg: BG, accent: '#3ce4ff',
@@ -440,19 +447,19 @@
       const C = alert ? AMBER : CYAN;
 
       // 开机：t<0.1 时 CRT 式中线展开
-      const boot = clamp((t + 0.4) / 0.35);
+      const boot = clamp((t + 0.4) / 0.3);
       const g = glitch > 0 ? cpuCtx('glitch') : ctx;
       const target = glitch > 0 ? g.canvas : null;
 
       drawBG(g, S, C, alert, t);
       if (boot < 1) {
         // 开机前：中心一道亮线向两侧展开，再纵向打开
-        const h = E.inExpo(clamp((t + 0.1) / 0.3)) * 1920;
+        const h = E.inOut3(clamp((t + 0.32) / 0.22)) * 1920;
         g.save(); g.beginPath(); g.rect(0, 960 - Math.max(3, h) / 2, 1080, Math.max(3, h)); g.clip();
         drawHUD(g, t, S, C, alert);
         g.restore();
         const lw = E.out3(boot) * 1080;
-        g.fillStyle = rgba(WHITE, 0.9 * (1 - clamp((t + 0.1) / 0.3)));
+        g.fillStyle = rgba(WHITE, 0.9 * (1 - clamp((t + 0.32) / 0.22)));
         g.fillRect(540 - lw / 2, 958, lw, 4);
         const hg = g.createRadialGradient(540, 960, 0, 540, 960, 400);
         hg.addColorStop(0, rgba(CYAN, 0.35 * (1 - boot * 0.6))); hg.addColorStop(1, rgba(CYAN, 0));
@@ -461,6 +468,12 @@
         drawHUD(g, t, S, C, alert);
       }
       if (alert) drawAlert(g, t, S, 1);
+      // 辉光：整幅 1/4 降采样模糊后加色叠回
+      {
+        const B = cpuSmall();
+        B.filter = 'blur(4px)'; B.drawImage(g.canvas, 0, 0, 270, 480); B.filter = 'none';
+        g.save(); g.globalCompositeOperation = 'lighter'; g.globalAlpha = 0.6; g.drawImage(B.canvas, 0, 0, 1080, 1920); g.restore();
+      }
       scanlines(g, S, t);
 
       if (target) {

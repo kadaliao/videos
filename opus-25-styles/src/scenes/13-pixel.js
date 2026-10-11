@@ -233,7 +233,13 @@
         if (i % 6 === 0 && tw > 1) { px(x - 1, y, cr); px(x + 1, y, cr); px(x, y - 1, cr); px(x, y + 1, cr); }
       }
     }
-    // 太阳 / 月亮
+    // 云
+    const cm = { w: c32(P.cloud), s: c32(P.cloudSh) };
+    for (let i = 0; i < 4; i++) {
+      const span = 260, cx = ((Math.floor(-t * (2 + i) - i * 67 + 300) % span) + span) % span - 40, cy = [158, 132, 176, 146][i];
+      blit(CLOUD, cx, cy, cm, i % 2 === 1);
+    }
+    // 太阳 / 月亮（在云前面）
     const sx = pi === 0 ? 142 : pi === 1 ? 120 : 140, sy = pi === 0 ? 190 : pi === 1 ? 206 : 186, R = pi === 1 ? 18 : 12;
     const sun = c32(P.sun), hi = c32(P.sunHi), crat = c32('#c8c39a'), stripe = c32(P.sky[3]);
     for (let y = -R - 5; y <= R + 5; y++) for (let x = -R - 5; x <= R + 5; x++) {
@@ -244,12 +250,6 @@
         if (pi === 1 && y > 2 && (y % 4 === 0 || (y % 4 === 1 && y > 8))) c = stripe; // 落日条纹
         px(sx + x, sy + y, c);
       } else if (d <= R + 4 && ((x + y) & 1) === 0 && d > R + 1) px(sx + x, sy + y, pi === 2 ? stripe : sun);
-    }
-    // 云
-    const cm = { w: c32(P.cloud), s: c32(P.cloudSh) };
-    for (let i = 0; i < 4; i++) {
-      const span = 260, cx = ((Math.floor(-t * (2 + i) - i * 67 + 300) % span) + span) % span - 40, cy = [158, 132, 176, 146][i];
-      blit(CLOUD, cx, cy, cm, i % 2 === 1);
     }
   }
   function drawFar(t, S, P) {
@@ -493,11 +493,11 @@
       // 低分辨率层（给泛光用）
       const L = S.layer('s13-lo', LW, LH), lg = L.getContext('2d', { willReadFrequently: true });
       lg.putImageData(new ImageData(new Uint8ClampedArray(buf.buffer.slice(0)), LW, LH), 0, 0);
-      const B = S.layer('s13-bloom', LW, LH), bg = B.getContext('2d');
+      const B = S.layer('s13-bloom', LW, LH), bg = B.getContext('2d', { willReadFrequently: true });
       bg.globalCompositeOperation = 'source-over'; bg.globalAlpha = 1; bg.filter = 'blur(2.5px) brightness(1.2) saturate(1.3)';
       bg.clearRect(0, 0, LW, LH); bg.drawImage(L, 0, 0); bg.filter = 'none';
 
-      // CRT 合成（逐像素查表）
+      // CRT 合成（逐像素查表），泛光与玻璃反光也在 CPU 画布上叠好，最后一次贴到舞台
       const O = S.layer('s13-crt', OW, OH), og = O.getContext('2d', { willReadFrequently: true });
       if (!outID) outID = og.createImageData(OW, OH);
       const out = new Uint32Array(outID.data.buffer);
@@ -508,16 +508,15 @@
         out[i] = 0xff000000 | ((((c >> 16) & 255) * f >> 8) << 16) | ((((c >> 8) & 255) * f >> 8) << 8) | (((c & 255) * f) >> 8);
       }
       og.putImageData(outID, 0, 0);
-      ctx.drawImage(O, 0, 0);
-      ctx.save();
-      ctx.globalCompositeOperation = 'screen'; ctx.globalAlpha = 0.42; ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(B, 30, 30, OW - 60, OH - 60);
-      ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
-      // 玻璃反光
-      const gl = ctx.createRadialGradient(300, 260, 10, 300, 260, 520);
+      og.save();
+      og.globalCompositeOperation = 'screen'; og.globalAlpha = 0.42; og.imageSmoothingEnabled = true;
+      og.drawImage(B, 30, 30, OW - 60, OH - 60);
+      og.globalCompositeOperation = 'source-over'; og.globalAlpha = 1;
+      const gl = og.createRadialGradient(300, 260, 10, 300, 260, 520);
       gl.addColorStop(0, 'rgba(255,255,255,0.10)'); gl.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.fillStyle = gl; ctx.beginPath(); ctx.ellipse(320, 300, 460, 280, -0.55, 0, Math.PI * 2); ctx.fill();
-      ctx.restore();
+      og.fillStyle = gl; og.beginPath(); og.ellipse(320, 300, 460, 280, -0.55, 0, Math.PI * 2); og.fill();
+      og.restore();
+      ctx.drawImage(O, 0, 0);
     },
   });
 })();

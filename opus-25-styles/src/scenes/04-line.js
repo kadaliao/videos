@@ -158,6 +158,13 @@
     return g;
   }
 
+  const SMALL = {};
+  function smallCtx(k) {
+    if (!SMALL[k]) { const c = document.createElement('canvas'); c.width = 270; c.height = 480; SMALL[k] = c.getContext('2d', { willReadFrequently: true }); }
+    const g = SMALL[k]; g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over'; g.filter = 'none';
+    return g;
+  }
+
   registerScene({
     n: 4, key: 'line', zh: '线条动画', en: 'Single-line Art',
     bg: NAVY, accent: '#d6b67a',
@@ -189,6 +196,21 @@
       const cx = lerp(sx, 540, pull), cy = lerp(sy, MIDY, pull);
       const ax = 540, ay = lerp(700, MIDY, pull);       // 笔尖在屏幕上的锚点
 
+      // ---------- 视差金尘（不同景深，镜头移动时产生纵深）----------
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 26; i++) {
+        const d = 0.35 + 0.9 * S.hash(i * 3.3);                    // 景深系数：<1 远，>1 近
+        const px = S.hash(i * 7.1) * 1300 - 110, py = S.hash(i * 5.7) * 1500 + 60 + Math.sin(t * 0.8 + i) * 12;
+        const x = ax + (px - cx) * z * d, y = ay + (py - cy) * z * d;
+        const r = (d > 1 ? 16 : 6) * d * (0.8 + 0.4 * S.hash(i));
+        const a = (d > 1 ? 0.10 : 0.16) * (0.6 + 0.4 * Math.sin(t * 2 + i * 1.7));
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, `rgba(240,200,130,${a})`); g.addColorStop(1, 'rgba(240,200,130,0)');
+        ctx.fillStyle = g; ctx.fillRect(x - r, y - r, r * 2, r * 2);
+      }
+      ctx.restore();
+
+      const CAM = [ax, ay, z, cx, cy];
       ctx.save();
       ctx.translate(ax, ay); ctx.scale(z, z); ctx.translate(-cx, -cy);
 
@@ -289,6 +311,21 @@
       }
       ctx.restore();
 
+      // ---------- 辉光：只把金线与月亮在 1/4 分辨率上重画、模糊后加色叠回 ----------
+      {
+        const A = smallCtx('a'), B = smallCtx('b');
+        A.clearRect(0, 0, 270, 480); B.clearRect(0, 0, 270, 480);
+        A.save(); A.scale(0.25, 0.25); A.translate(CAM[0], CAM[1]); A.scale(CAM[2], CAM[2]); A.translate(-CAM[3], -CAM[4]);
+        A.lineCap = 'round'; A.lineJoin = 'round';
+        A.strokeStyle = col(GOLD, 0.9); A.lineWidth = 7; strokeRange(A, 0, L);
+        A.strokeStyle = col(HOT, 1); A.lineWidth = 12; strokeRange(A, Math.max(0, L - 260 * heat), L);
+        if (fillK > 0) { A.fillStyle = col(GOLD, 0.32 * fillK); A.beginPath(); A.arc(mx, my, mr, 0, S.TAU); A.fill(); }
+        A.restore();
+        B.filter = 'blur(5px)'; B.drawImage(A.canvas, 0, 0); B.filter = 'none';
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.75;
+        ctx.drawImage(B.canvas, 0, 0, 1080, 1920); ctx.restore();
+      }
+
       // ---------- 画框：细金线角标（屏幕空间）----------
       const fr = E.out3(seg(t, -0.4, 0.4));
       ctx.strokeStyle = col(GOLD, 0.5); ctx.lineWidth = 2;
@@ -298,9 +335,9 @@
       }
 
       // ---------- 标题（屏幕空间，底部）----------
-      const tg = ctx.createLinearGradient(0, 1150, 0, 1600);
-      tg.addColorStop(0, 'rgba(8,12,26,0)'); tg.addColorStop(0.45, 'rgba(8,12,26,0.82)'); tg.addColorStop(1, 'rgba(8,12,26,0.9)');
-      ctx.fillStyle = tg; ctx.fillRect(0, 1150, 1080, 450);
+      const tg = ctx.createLinearGradient(0, 1150, 0, 1920);
+      tg.addColorStop(0, 'rgba(8,12,26,0)'); tg.addColorStop(0.26, 'rgba(8,12,26,0.8)'); tg.addColorStop(0.6, 'rgba(8,12,26,0.86)'); tg.addColorStop(1, 'rgba(8,12,26,0.6)');
+      ctx.fillStyle = tg; ctx.fillRect(0, 1150, 1080, 770);
 
       const tIn = t + 0.15;
       // 金线下划线：一笔划过
