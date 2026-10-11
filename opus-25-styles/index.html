@@ -41,7 +41,7 @@
   })));
   for (const d of Object.values(SCENES)) if (d.init) await d.init(S);
   const cv = document.getElementById('stage'), ctx = cv.getContext('2d');
-  window.FPS_OUT = 30; window.TOTAL_FRAMES = Math.round(TL.TOTAL * FPS_OUT);
+  window.FPS_OUT = +(q.get('fps') || 30); window.TOTAL_FRAMES = Math.round(TL.TOTAL * FPS_OUT);
   window.renderAt = async T => COMPOSE.renderAt(ctx, T);
   window.renderFrame = async i => COMPOSE.renderAt(ctx, i / FPS_OUT);
   window.renderScene = async ([n, t]) => { COMPOSE.resetCtx(ctx); ctx.clearRect(0, 0, 1080, 1920); COMPOSE.drawScene(ctx, n, t); };

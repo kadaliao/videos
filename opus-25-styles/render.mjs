@@ -3,7 +3,7 @@
 //   node render.mjs --stills 3.5,10,20                 全片时间点静帧 → build/stills/
 //   node render.mjs --scene 7 --times 0,1,2,3          单个场景（不带转场）的本地时间静帧 → build/stills/s07/
 //   node render.mjs --scene 7 --sheet                  单个场景 -0.2..4.2s 每 0.3s 一帧的接触表 → build/stills/s07/sheet.jpg
-//   node render.mjs --out build/video.mp4 [--workers 4] [--from 秒] [--to 秒] [--fps 30]
+//   node render.mjs --out build/video.mp4 [--workers 4] [--from 秒] [--to 秒] [--fps 30|60] [--bitrate 6000k]
 import { chromium } from 'playwright';
 import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, existsSync, rmSync } from 'node:fs';
@@ -22,7 +22,7 @@ async function open() {
   const p = await browser.newPage({ viewport: { width: 1080, height: 1920 } });
   p.on('pageerror', e => { errors.push(e.message); console.error('[pageerror]', e.message); });
   p.on('console', m => ['warning', 'error'].includes(m.type()) && console.warn('[console]', m.text()));
-  await p.goto(`http://127.0.0.1:${PORT}/index.html?mode=render`); await p.waitForFunction(() => window.__ready === true, null, { timeout: 180000 });
+  await p.goto(`http://127.0.0.1:${PORT}/index.html?mode=render&fps=${opt('--fps', 30)}`); await p.waitForFunction(() => window.__ready === true, null, { timeout: 180000 });
   return p;
 }
 const grab = (p, fn, arg, type = 'jpeg') => p.evaluate(async ([fn, arg, type]) => { await window[fn](arg); const u = document.getElementById('stage').toDataURL('image/' + type, 0.94); return u.slice(u.indexOf(',') + 1); }, [fn, arg, type]);
@@ -53,7 +53,7 @@ if (opt('--scene')) {
   const p0 = await open(); const fps = await p0.evaluate(() => window.FPS_OUT), total = await p0.evaluate(() => window.TOTAL_FRAMES); await p0.close();
   const f0 = Math.round(+opt('--from', 0) * fps), f1 = Math.min(total, Math.round(+opt('--to', 1e9) * fps));
   // 帧按全片绝对序号命名；只渲染一段（--from/--to）时保留其余帧，方便局部重渲后再整体编码
-  const dir = join(ROOT, 'build/frames'); mkdirSync(dir, { recursive: true }); if (f0 === 0 && f1 === total) for (const f of readdirSync(dir)) unlinkSync(join(dir, f));
+  const dir = join(ROOT, fps === 30 ? 'build/frames' : `build/frames${fps}`); mkdirSync(dir, { recursive: true }); if (f0 === 0 && f1 === total) for (const f of readdirSync(dir)) unlinkSync(join(dir, f));
   const workers = +opt('--workers', 4); let done = 0; const t0 = Date.now();
   await Promise.all(Array.from({ length: workers }, async (_, k) => {
     const p = await open();
@@ -64,9 +64,10 @@ if (opt('--scene')) {
   }));
   console.log(`rendered ${f1 - f0} frames in ${((Date.now() - t0) / 1000).toFixed(0)}s`);
   const OUTV = opt('--out', 'build/video.mp4'); mkdirSync(dirname(join(ROOT, OUTV)), { recursive: true });
-  // 两遍编码，6 Mbps：成片控制在 GitHub 单文件 100 MB 以内
+  // 两遍编码，默认 6 Mbps：成片控制在 GitHub 单文件 100 MB 以内
+  const BR = opt('--bitrate', '6000k');
   const enc = pass => ['-v', 'error', '-y', '-framerate', String(fps), '-i', join(dir, '%05d.jpg'), '-vf', 'scale=in_range=full:out_range=tv:in_color_matrix=bt601:out_color_matrix=bt709,format=yuv420p',
-    '-c:v', 'libx264', '-preset', 'slow', '-b:v', '6000k', '-maxrate', '9000k', '-bufsize', '12000k', '-pass', String(pass), '-passlogfile', join(ROOT, 'build/x264')];
+    '-c:v', 'libx264', '-preset', 'slow', '-b:v', BR, '-maxrate', Math.round(parseInt(BR) * 1.5) + 'k', '-bufsize', parseInt(BR) * 2 + 'k', '-pass', String(pass), '-passlogfile', join(ROOT, 'build/x264')];
   execFileSync('ffmpeg', [...enc(1), '-an', '-f', 'null', '-'], { stdio: 'inherit' });
   execFileSync('ffmpeg', [...enc(2), '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-movflags', '+faststart', join(ROOT, OUTV)], { stdio: 'inherit' });
   console.log(OUTV);
