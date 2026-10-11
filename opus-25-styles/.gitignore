@@ -1,0 +1,5 @@
+node_modules/
+build/
+out/
+fonts/*.ttf
+!fonts/*-sub.ttf

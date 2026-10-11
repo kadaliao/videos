@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>一个模型，25 种画风</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  #stage { height: 100vh; aspect-ratio: 9 / 16; display: block; }
+  body.render #stage { height: auto; width: 1080px; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; height: 28px; background: rgba(255,255,255,.08); cursor: pointer; }
+  #bar i { display: block; height: 100%; width: 0; background: rgba(255,255,255,.35); }
+  #hint { position: fixed; top: 10px; left: 12px; color: #888; font: 13px/1.4 system-ui; }
+  body.render #bar, body.render #hint { display: none; }
+</style>
+</head>
+<body>
+<canvas id="stage" width="1080" height="1920"></canvas>
+<div id="bar"><i></i></div><div id="hint">空格 播放/暂停 · 点击进度条跳转 · ←/→ 逐秒</div>
+<script src="src/fonts.js"></script>
+<script src="src/core.js"></script>
+<script src="src/timeline.js"></script>
+<script src="src/compose.js"></script>
+<script src="src/framing.js"></script>
+<script>
+(async () => {
+  const q = new URLSearchParams(location.search), RENDER = q.get('mode') === 'render';
+  if (RENDER) document.body.classList.add('render');
+  const sub = q.get('fonts') !== 'full';
+  // 字体：优先子集化版本，没有就用完整版
+  await Promise.all(Object.entries(FONTS).map(async ([fam, [file, weight]]) => {
+    for (const f of (sub ? [file + '-sub', file] : [file])) {
+      try { const ff = new FontFace(fam, `url(fonts/${f}.ttf)`, weight ? { weight: String(weight) } : {}); await ff.load(); document.fonts.add(ff); return; } catch (e) {}
+    }
+    console.warn('font missing: ' + fam);
+  }));
+  // 场景脚本：src/scenes/NN-key.js，缺失的用占位卡
+  await Promise.all(TL.STYLES.map(s => new Promise(res => {
+    const el = document.createElement('script'); el.src = `src/scenes/${String(s.n).padStart(2, '0')}-${s.key}.js`; el.onload = el.onerror = res; document.head.appendChild(el);
+  })));
+  for (const d of Object.values(SCENES)) if (d.init) await d.init(S);
+  const cv = document.getElementById('stage'), ctx = cv.getContext('2d');
+  window.FPS_OUT = 30; window.TOTAL_FRAMES = Math.round(TL.TOTAL * FPS_OUT);
+  window.renderAt = async T => COMPOSE.renderAt(ctx, T);
+  window.renderFrame = async i => COMPOSE.renderAt(ctx, i / FPS_OUT);
+  window.renderScene = async ([n, t]) => { COMPOSE.resetCtx(ctx); ctx.clearRect(0, 0, 1080, 1920); COMPOSE.drawScene(ctx, n, t); };
+  window.__ready = true;
+  if (RENDER) return;
+  // 预览播放
+  const audio = new Audio('build/music.wav'); let playing = false, T = +(q.get('t') || 0), last = performance.now();
+  const bar = document.querySelector('#bar i');
+  const seek = x => { T = Math.max(0, Math.min(TL.TOTAL, x)); audio.currentTime = T; };
+  document.getElementById('bar').onclick = e => seek(e.clientX / innerWidth * TL.TOTAL);
+  addEventListener('keydown', e => {
+    if (e.code === 'Space') { playing = !playing; if (playing) { audio.currentTime = T; audio.play().catch(() => {}); } else audio.pause(); }
+    if (e.code === 'ArrowRight') seek(T + 1); if (e.code === 'ArrowLeft') seek(T - 1);
+  });
+  (function loop(now) {
+    if (playing) { T = audio.readyState >= 2 && !audio.paused ? audio.currentTime : T + (now - last) / 1000; if (T >= TL.TOTAL) { playing = false; audio.pause(); } }
+    last = now; COMPOSE.renderAt(ctx, T); bar.style.width = (T / TL.TOTAL * 100) + '%'; requestAnimationFrame(loop);
+  })(performance.now());
+})();
+</script>
+</body>
+</html>
