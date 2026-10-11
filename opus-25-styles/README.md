@@ -6,7 +6,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| [`opus-25-styles_1080p30.mp4`](opus-25-styles_1080p30.mp4) | 1080×1920 · 30fps，-14 LUFS |
+| [`opus-25-styles_1080p30.mp4`](opus-25-styles_1080p30.mp4) | 1080×1920 · 30fps，90 MB，-14 LUFS |
 | [`cover.png`](cover.png) | 竖版封面 |
 
 ## 25 种风格
