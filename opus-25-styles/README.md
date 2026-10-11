@@ -6,7 +6,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| [`opus-25-styles_1080p30.mp4`](opus-25-styles_1080p30.mp4) | 1080×1920 · 30fps，90 MB，-14 LUFS |
+| [`opus-25-styles_1080p60.mp4`](opus-25-styles_1080p60.mp4) | 1080×1920 · 60fps，93 MB，-14 LUFS |
 | [`cover.png`](cover.png) | 竖版封面 |
 
 ## 25 种风格
@@ -46,7 +46,7 @@
 
 - **场景**：`src/scenes/NN-key.js`，每个文件注册一个 `draw(ctx, t, S)`，是时间 t 的纯函数（多个浏览器乱序并行渲染）。约定见 [`src/scenes/README.md`](src/scenes/README.md)。25 个场景由 5 个子代理并行编写，各自出接触表自查迭代。
 - **剪辑表**：[`src/timeline.js`](src/timeline.js)，段落、转场类型和时长；[`src/compose.js`](src/compose.js) 在转场窗口里把前后两段各画进离屏层再合成，22 种转场都写在这里；片头、章节卡、片尾在 [`src/framing.js`](src/framing.js)，由场景的实时缩略图拼成。
-- **渲染**：[`render.mjs`](render.mjs) 起本地静态服务，4 个无头 Chromium 页面并行逐帧 `toDataURL`，ffmpeg 合成。必须用软件 2D 画布（`--disable-accelerated-2d-canvas`）：无头环境下 GPU 画布走 SwiftShader，离屏层之间一次 `drawImage` 要几十到几百毫秒，换成软件画布后整片平均约 0.1 秒一帧。
+- **渲染**：[`render.mjs`](render.mjs) 起本地静态服务，4 个无头 Chromium 页面并行逐帧 `toDataURL`，ffmpeg 合成。必须用软件 2D 画布（`--disable-accelerated-2d-canvas`）：无头环境下 GPU 画布走 SwiftShader，离屏层之间一次 `drawImage` 要几十到几百毫秒，换成软件画布后整片平均约 0.1 秒一帧。画面只由 t 决定，所以帧率只是渲染参数；默片、拼贴、像素等风格里故意的低帧率步进在 60 帧下照旧。成片用两遍编码压在 6.2 Mbps，保证单文件不超过 GitHub 的 100 MB 上限。
 - **配乐**：[`music.py`](music.py) 全部合成（超级锯齿铺底、加法合成拨弦、FM 钟琴、锯齿主旋律、合成鼓组、侧链、合成混响）。前 15 种每 16 秒加一层，章节卡抽空鼓组砸“+10”，后 10 种进 drop 和主旋律；每个转场有一个短过门，部分转场配专门的音效（故障、电视关机、芯片音、水滴、电流嗡声、键盘、放映机）。`tools/listen.py` 把混音交给 Qwen Omni 听，按时间点挑问题。
 
 ## 重新渲染
@@ -58,8 +58,8 @@ npm ci
 uv run --with numpy --with scipy python music.py      # 配乐 → build/music.wav
 node render.mjs --scene 7 --sheet                     # 单个场景接触表 → build/stills/s07/sheet.jpg
 node render.mjs --stills 10,30.5                      # 全片时间点静帧
-node render.mjs --out build/video.mp4                 # 逐帧渲染（4 路并行，约 10 分钟）
-python3 mix.py                                        # 合成 + 响度归一 → out/opus-25-styles_1080p30.mp4
+node render.mjs --fps 60 --out build/video60.mp4     # 逐帧渲染 7200 帧（4 路并行，约 17 分钟）；不加 --fps 为 30 帧
+python3 mix.py 60                                     # 合成 + 响度归一 → out/opus-25-styles_1080p60.mp4
 ```
 
 - 直接用静态服务器打开 `index.html` 可以边听 `build/music.wav` 边预览（空格播放，点进度条跳转）。
