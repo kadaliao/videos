@@ -164,7 +164,7 @@
       // 旋转圆环（逐格 z-buffer）
       const gc = 52, gr = 20, gx0 = 4, gy0 = 26.6;
       if (t > 0.45) {
-        const appear = S.clamp((t - 0.45) / 0.4), spin = t + 0.6 * S.E.outExpo(S.clamp((t - 2) / 0.6));
+        const appear = S.clamp((t - 0.45) / 0.4), spin = t + 0.6 * S.E.outExpo(S.clamp((t - 2) / 0.6)) - 0.35 * Math.max(0, t - 3.3) ** 2;
         const A = 0.9 + spin * 1.6, B = 0.4 + spin * 0.7;
         const D = donut(A, B, gc, gr), pz = S.pulse(t, 7);
         const pal = amber ? cols.a : cols.g;

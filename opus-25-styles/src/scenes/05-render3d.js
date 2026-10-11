@@ -45,8 +45,8 @@ const float BR = 0.045, SX = 0.106, SZ = 0.0918;
 vec3 gP0, gP1, gP2, gS0, gS1, gS2; mat2 gR0, gR1; vec4 gFR, gBB; float gK0, gK1, gK2;
 const vec3 HERO = vec3(1.0, 0.40, 0.15);
 const vec3 PINK = vec3(0.98, 0.70, 0.82);
-const vec3 SKYT = vec3(0.80, 0.76, 0.98);
-const vec3 SKYH = vec3(1.0, 0.89, 0.88);
+const vec3 SKYT = vec3(0.86, 0.83, 1.08);
+const vec3 SKYH = vec3(1.1, 1.0, 1.04);
 const vec3 LDIR = vec3(-0.5263, 0.8134, -0.2871);
 
 float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
@@ -83,6 +83,7 @@ float sphHit(vec3 ro, vec3 rd, vec3 c, float r){
 }
 vec3 beadPos(vec2 id){ return vec3((id.x + 0.5 * mod(id.y, 2.)) * SX, BR + cellAt(id).r + hash12(id) * 0.012, id.y * SZ); }
 
+
 vec3 sky(vec3 rd){
   vec3 c = mix(SKYH, SKYT, smoothstep(-0.05, 0.6, rd.y));
   c += smoothstep(0.93, 0.965, dot(rd, vec3(-0.6, 0.75, 0.25) * 0.9922)) * 1.6;
@@ -93,7 +94,7 @@ vec3 sky(vec3 rd){
 vec3 beadAlbedo(vec2 cid, out float spread){
   vec4 f = cellAt(cid);
   float h = hash12(cid + 7.1);
-  vec3 base = h < 0.3 ? vec3(0.88, 0.83, 0.99) : h < 0.55 ? vec3(0.82, 0.86, 1.0) : h < 0.8 ? vec3(0.99, 0.86, 0.94) : vec3(1.0, 0.97, 0.94);
+  vec3 base = h < 0.3 ? vec3(0.86, 0.78, 1.0) : h < 0.55 ? vec3(0.74, 0.82, 1.0) : h < 0.8 ? vec3(1.0, 0.80, 0.91) : vec3(1.0, 0.97, 0.93);
   float th = hash12(cid + 3.3);
   float g = smoothstep(th * 0.7, th * 0.7 + 0.3, f.g);
   float pk = smoothstep(th * 0.7, th * 0.7 + 0.3, f.b);
@@ -114,7 +115,8 @@ void main(){
 #ifdef D_TRIV
   fragColor = vec4(1.); return;
 #endif
-  vec2 uv = (gl_FragCoord.xy - 0.5 * uR) / uR.y * 2.;
+  vec2 fc = vec2(gl_FragCoord.x, uR.y - gl_FragCoord.y);   // 上下翻转，readPixels 后即为正向
+  vec2 uv = (fc - 0.5 * uR) / uR.y * 2.;
   vec3 ro = uCam;
   vec3 fw = normalize(uTgt - ro), rt = normalize(cross(fw, vec3(0, 1, 0))), up = cross(rt, fw);
   vec3 rd = normalize(fw * 2.25 + uv.x * rt + uv.y * up);
@@ -123,7 +125,7 @@ void main(){
   // 1) 珠田：逐行（z 方向）解析求交
 #ifndef D_NOBEADS
   if (rd.y < 0.) {
-    float ta = max(0., (ro.y - 0.21) / -rd.y), tb = min(tmax, (ro.y + 0.12) / -rd.y);
+    float ta = max(0., (ro.y - 0.18) / -rd.y), tb = min(tmax, (ro.y + 0.12) / -rd.y);
     if (ta < tmax) {
       float rz = abs(rd.z) < 1e-3 ? 1e-3 : rd.z;
       float za = ro.z + rz * ta, zb = ro.z + rz * tb, dir = sign(zb - za);
@@ -131,10 +133,11 @@ void main(){
       int extra = -1;
       for (int k = 0; k < 44; k++) {
         float tj = (j * SZ - ro.z) / rz, xj = ro.x + rd.x * tj, off = 0.5 * mod(j, 2.);
-        float i0 = floor(xj / SX - off + 0.5);
-        for (int di = -1; di <= 1; di++) {
-          vec2 id = vec2(i0 + float(di), j);
-          float th = sphHit(ro, rd, beadPos(id), BR * (0.92 + 0.12 * hash12(id.yx)));
+        float fx = xj / SX - off, i0 = floor(fx + 0.5), i1 = i0 + (fx + 0.5 - i0 < 0.5 ? -1. : 1.);
+        for (int di = 0; di < 2; di++) {
+          vec2 id = vec2(di == 0 ? i0 : i1, j);
+          float hh = hash12(id);
+          float th = sphHit(ro, rd, vec3((id.x + off) * SX, BR + cellAt(id).r + hh * 0.012, j * SZ), BR * (0.92 + 0.12 * fract(hh * 7.31)));
           if (th < t) { t = th; cid = id; mat = 6.; }
         }
         if (mat > 0.) { extra++; if (extra >= 1) break; }
@@ -184,7 +187,7 @@ void main(){
     bool needAO = dNear < 0.5;
     bool needSh = false;
     for (int k = 0; k < 3; k++) { vec3 oc = p - (k == 0 ? gP0 : k == 1 ? gP1 : gP2); float b = dot(oc, LDIR), c = dot(oc, oc) - 0.81; if (c < 0. || (b < 0. && b * b > c)) needSh = true; }
-    int iEnd = needSh ? 21 : 7;
+    int iEnd = needSh ? 18 : 7;
     int iBeg = isObj ? 0 : needAO ? 4 : 7;
     for (int i = iBeg; i < iEnd; i++) {
       if (i == 7 && !needSh) break;
@@ -194,11 +197,11 @@ void main(){
       float d = obj3(q, dm);
       if (i < 4) { nacc += e * d; if (i == 3) n = normalize(nacc); }
       else if (i < 7) { if (needAO) { occ += (hh - d) * sca; sca *= 0.6; } }
-      else { sh = min(sh, 8. * d / st); st += clamp(d, 0.05, 0.45); if (sh < 0.01 || st > 4.) break; }
+      else { sh = min(sh, 8. * d / st); st += clamp(d, 0.06, 0.5); if (sh < 0.01 || st > 3.5) break; }
     }
     sh = clamp(sh, 0., 1.);
     float ao = clamp(1. - 2.2 * occ, 0., 1.);
-    if (mat == 6.) ao *= mix(0.42, 1., smoothstep(-0.6, 0.7, n.y));
+    if (mat == 6.) ao *= mix(0.55, 1., smoothstep(-0.6, 0.7, n.y));
     if (mat == 4.) ao *= 0.4;
     vec3 r = reflect(rd, n);
     // 珠子颜色（珠田本身，或铬球里反射出的珠田）——只调用一次
@@ -210,7 +213,7 @@ void main(){
       bead = smoothstep(BR * 1.05, BR * 0.6, length(l));
     }
     float sp = 0.;
-    vec3 balb = (mat == 6. || mat == 3.) ? beadAlbedo(bid, sp) : vec3(0.);
+    vec3 balb = mat == 6. ? beadAlbedo(bid, sp) : vec3(0.);
     float gloss = 0.5, spec = 0.6;
     vec3 alb = vec3(0.72, 0.64, 0.88);
     if (mat == 1.) { alb = HERO; gloss = 1.; spec = 1.; }
@@ -221,17 +224,18 @@ void main(){
     float dif = clamp(dot(n, LDIR), 0., 1.);
     vec3 h = normalize(LDIR - rd);
     float fre = pow(1. - clamp(dot(n, -rd), 0., 1.), 4.);
-    col = alb * (vec3(1.0, 0.97, 0.94) * dif * sh * 0.72 + vec3(0.86, 0.82, 0.98) * (0.5 + 0.22 * n.y) * ao);
-    if (mat == 1. || mat == 2.) col += alb * alb * 0.22 * (1. - dif * sh) * ao;   // 糖釉的次表面暖光
+    col = alb * (vec3(1.0, 0.97, 0.94) * dif * sh * 0.62 + vec3(0.92, 0.88, 1.0) * (0.62 + 0.22 * n.y) * ao);
+    if (mat == 1. || mat == 2.) col += alb * alb * 0.4 * (1. - 0.6 * dif * sh) * mix(0.6, 1., ao);   // 糖釉的次表面暖光
     col += spec * pow(clamp(dot(n, h), 0., 1.), 90.) * sh * 1.4;
     vec3 env = sky(r);
-    if (r.y < 0.) env = mix(env, vec3(0.86, 0.80, 0.95), smoothstep(0., -0.15, r.y));
+    if (r.y < 0.) env = mix(env, vec3(0.88, 0.84, 0.98), smoothstep(0., -0.15, r.y));
     col += gloss * (0.06 + 0.6 * fre) * env * mix(1., ao, 0.6) * mix(0.35, 1., smoothstep(-0.2, 0.3, r.y));
     if (mat == 3.) {
       vec3 rc = env;
       if (r.y < -0.02) {
-        rc = balb * mix(0.45, 1.0, bead) * (0.75 + 0.35 * (0.5 - l.x / SX));
-        rc = mix(rc, env, smoothstep(2., 7., tp));
+        float g = cellAt(bid).g;
+        rc = mix(vec3(0.84, 0.80, 0.98), vec3(1.0, 0.5, 0.25), smoothstep(0.2, 0.8, g)) * 0.9;
+        rc = mix(rc, env, smoothstep(1.5, 6., tp));
       }
       col = rc * vec3(0.93, 0.94, 1.0) * (0.78 + 0.25 * fre) + pow(clamp(dot(n, h), 0., 1.), 220.) * 2.;
       col *= mix(0.6, 1., ao);
@@ -239,7 +243,7 @@ void main(){
     col = mix(col, bg, smoothstep(6.5, 15.5, t));
   }
   col = col / (1. + col * 0.12);
-  vec2 q = gl_FragCoord.xy / uR;
+  vec2 q = fc / uR;
   col *= 0.9 + 0.1 * pow(16. * q.x * q.y * (1. - q.x) * (1. - q.y), 0.2);
   fragColor = vec4(clamp(col, 0., 1.), 1.);
 }`;
@@ -286,7 +290,7 @@ void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)
         let h = 0, hero = 0, pink = 0;
         for (const m of impacts) {
           const dt = t - m.t, d = Math.hypot(x - m.x, z - m.z), front = dt * 2.3;
-          if (d < front + 0.1) h += m.s * 0.075 * Math.sin(15 * (d - front)) * Math.exp(-dt * 1.5) * Math.exp(-d * 0.45) * S.smooth(front + 0.1, front - 0.25, d);
+          if (d < front + 0.1) h += m.s * 0.11 * Math.sin(13 * (d - front)) * Math.exp(-dt * 1.5) * Math.exp(-d * 0.45) * S.smooth(front + 0.1, front - 0.25, d);
         }
         for (const o of objs) {
           const d = Math.hypot(x - o.x, z - o.z);
@@ -331,15 +335,15 @@ void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)
     gl.viewport(0, 0, GW, GH); gl.useProgram(GL.pr);
     // 场贴图
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, GL.tex);
-    const _f0 = performance.now(); const fb = fieldTexture(t, objs), sc = scatter(t, objs); if (window.__flags) console.error('s05 field', (performance.now() - _f0).toFixed(1));
+    const fb = fieldTexture(t, objs), sc = scatter(t, objs);
     sc.forEach((v, i) => fb.set(v, (TH * TW + i) * 4));
-    if (!(window.__flags || '').includes('noup') || !GL.up) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TW, TH + 1, gl.RGBA, gl.FLOAT, fb); GL.up = 1;
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TW, TH + 1, gl.RGBA, gl.FLOAT, fb);
     gl.uniform1i(U.uField, 0);
     gl.uniform4f(U.uFieldRect, I0, J0, TW, TH);
     gl.uniform2f(U.uR, GW, GH); gl.uniform1f(U.uT, t);
     // 镜头：一镜到底的缓慢推近 + 环绕
     const k = S.E.inOut2(S.seg(t, -0.6, 4.6));
-    const ang = S.lerp(0.45, 0.12, k), dist = S.lerp(7.0, 6.1, k), hgt = S.lerp(3.1, 2.7, k);
+    const ang = S.lerp(0.5, 0.02, k), dist = S.lerp(7.1, 5.9, k), hgt = S.lerp(3.2, 2.6, k);
     gl.uniform3f(U.uCam, Math.sin(ang) * dist, hgt, Math.cos(ang) * dist - 0.2);
     gl.uniform3f(U.uTgt, 0.0, 0.1, -0.15);
     const P = [], Sc = [];
@@ -366,10 +370,13 @@ void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)
     draw(ctx, t, S) {
       const { W, H, E, seg, clamp } = S;
       if (!GL) initGL();
-      const _t0 = performance.now(); const c = (window.__flags || '').includes('noGL') ? GL.c : renderGL(t); if (window.__flags) { const px = new Uint8Array(4); GL.gl.readPixels(0,0,1,1,GL.gl.RGBA,GL.gl.UNSIGNED_BYTE,px); } const _t1 = performance.now();
-      ctx.save(); ctx.imageSmoothingQuality = 'low'; if (!(window.__flags || '').includes('noblit')) ctx.drawImage(c, 0, 0, W, H); ctx.restore(); if (window.__flags) { ctx.getImageData(0,0,1,1); console.error('s05 gl', (_t1-_t0).toFixed(0), 'blit', (performance.now()-_t1).toFixed(0)); }
+      renderGL(t);
+      ctx.save(); ctx.imageSmoothingQuality = 'low'; // 读回像素（着色器已上下翻转输出）→ 离屏层 → 放大绘制；比直接 drawImage(WebGL 画布) 省很多
+      const gl = GL.gl; if (!GL.px) { GL.px = new Uint8ClampedArray(GW * GH * 4); GL.img = new ImageData(GL.px, GW, GH); }
+      gl.readPixels(0, 0, GW, GH, gl.RGBA, gl.UNSIGNED_BYTE, GL.px);
+      const L = S.layer('s05-gl', GW, GH); L.getContext('2d').putImageData(GL.img, 0, 0);
+      ctx.drawImage(L, 0, 0, W, H); ctx.restore();
 
-      if ((window.__flags || '').includes('noTitle')) return;
       // ---------- 标题：干净的产品渲染式排版 ----------
       const a = E.out3(seg(t, -0.3, 0.45)), b = E.out3(seg(t, -0.15, 0.6)), c2 = E.out3(seg(t, 0.0, 0.7));
       ctx.save();

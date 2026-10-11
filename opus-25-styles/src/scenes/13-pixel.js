@@ -474,6 +474,7 @@
   registerScene({
     n: 13, key: 'pixel', zh: '16-bit 像素风', en: '16-bit Pixel Art',
     bg: '#3d7cf0', accent: '#ffd23a',
+    init: async () => { buildCRT(); },
     draw(ctx, t, S) {
       if (!MAP) buildCRT();
       const pi = palAt(t), P = PAL[pi];
